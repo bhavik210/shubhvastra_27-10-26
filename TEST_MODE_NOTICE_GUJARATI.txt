@@ -1,4 +1,4 @@
-જૂની TEST MODE notice હવે લાગુ પડતી નથી.
-આ build માં login ફરજિયાત છે અને active Admin દ્વારા જ Utilities/Admin Panel ખોલી શકાય છે.
-પ્રથમ વખત database માં active Admin ન હોય ત્યારે Initial Admin Setup screen પરથી Main Admin બનાવો.
+TEST MODE દૂર કરવામાં આવ્યું છે.
+હવે software ખોલવા માટે username અને password જરૂરી છે.
+Admin દ્વારા Utilities / Admin Panel માંથી Admin, Member અને Staff users બનાવો.
 Login screen પર Forgot Password વિકલ્પ નથી.
