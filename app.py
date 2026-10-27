@@ -127,7 +127,7 @@ def init_db():
             conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled INTEGER NOT NULL DEFAULT 0"))
             conn.execute(text("ALTER TABLE order_item_sizes ADD COLUMN IF NOT EXISTS cancelled INTEGER NOT NULL DEFAULT 0"))
             conn.execute(text("ALTER TABLE order_dispatches ADD COLUMN IF NOT EXISTS invoice_number VARCHAR(150) NOT NULL DEFAULT ''"))
-        # TEST MODE: no application admin/user credentials are created.
+        # User accounts are created through first-run setup / Admin Panel.
         # Backfill SKU master from historic order items without changing saved order rates.
         conn.execute(text("""INSERT INTO sku_master(sku_number,sale_rate)
           SELECT TRIM(i.particulars), COALESCE(i.piece_rate,0) FROM order_items i
@@ -189,11 +189,56 @@ except Exception as exc:
     st.stop()
 
 
-# TEMPORARY TEST MODE: login is intentionally disabled at the owner's request.
+# Authentication: first run requires creating the first administrator; no default credentials.
 def current_user():
-    return {"id": 0, "username": "Testing Mode", "role": "admin"}
-def is_admin(): return True
-def require_login(): return True
+    return st.session_state.get("authenticated_user")
+
+def is_admin():
+    user = current_user()
+    return bool(user and user.get("role") == "admin")
+
+def require_login():
+    return current_user() is not None
+
+def show_first_admin_setup():
+    st.title("SHUBHVASTRA — Initial Admin Setup")
+    st.info("આ database માં હજી કોઈ user નથી. પહેલા મુખ્ય Admin username અને password બનાવો. કોઈ default password નથી.")
+    with st.form("first_admin_setup"):
+        username = st.text_input("Admin Username")
+        password = st.text_input("Admin Password", type="password")
+        confirm = st.text_input("Confirm Admin Password", type="password")
+        submitted = st.form_submit_button("Create Main Admin", type="primary")
+    if submitted:
+        if not username.strip():
+            st.error("Admin username જરૂરી છે.")
+        elif len(password) < 10:
+            st.error("Password ઓછામાં ઓછો 10 characters નો રાખો.")
+        elif password != confirm:
+            st.error("બંને password સરખા નથી.")
+        elif one("SELECT id FROM users WHERE LOWER(username)=LOWER(:u)", {"u":username.strip()}):
+            st.error("આ username પહેલેથી છે. બીજું username પસંદ કરો.")
+        elif one("SELECT id FROM users WHERE role='admin' AND active=1 LIMIT 1"):
+            st.error("Active Admin પહેલેથી છે. Login કરો.")
+        else:
+            run("INSERT INTO users(username,password_hash,role,active) VALUES(:u,:p,'admin',1)", {"u":username.strip(),"p":generate_password_hash(password)})
+            st.success("Main Admin તૈયાર થયો. હવે તમારા username અને password થી login કરો.")
+            st.rerun()
+
+def show_login():
+    st.title("SHUBHVASTRA Login")
+    st.caption("તમારા Admin દ્વારા બનાવેલા username અને password થી જ login કરી શકશો.")
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
+    if submitted:
+        user = one("SELECT id,username,password_hash,role,active FROM users WHERE LOWER(username)=LOWER(:u)", {"u":username.strip()})
+        if user and int(user["active"]) == 1 and check_password_hash(user["password_hash"], password):
+            st.session_state["authenticated_user"] = {"id":int(user["id"]),"username":user["username"],"role":user["role"]}
+            st.rerun()
+        else:
+            st.error("Username અથવા password ખોટો છે, અથવા user disabled છે.")
+    # Intentionally no Forgot Password option. Admin must reset staff passwords from Utilities.
 
 def df_download(df, filename, label="CSV Download"):
     out = df.to_csv(index=False).encode("utf-8-sig")
@@ -241,7 +286,7 @@ def header():
     with cols[1]:
         st.markdown('<div class="brandtitle">SHUBHVASTRA</div><div class="brandsub">NEW VERSION 2026 · ORDER MANAGEMENT SYSTEM</div>', unsafe_allow_html=True)
     with cols[2]:
-        st.caption("TEST MODE · Login disabled")
+        st.caption("Secure Login · Admin Controlled")
     st.divider()
 
 
@@ -632,22 +677,57 @@ def page_reports():
 
 
 def page_users():
-    if not is_admin(): st.error("આ વિભાગ ફક્ત Admin માટે છે."); return
-    st.title("Staff Login / User Management")
-    with st.form("new_user"):
-        c=st.columns(3); username=c[0].text_input("Username"); password=c[1].text_input("Temporary Password",type="password"); role=c[2].selectbox("Role",["staff","admin"])
-        if st.form_submit_button("Create User",type="primary"):
-            if not username.strip() or len(password)<8: st.error("Username અને ઓછામાં ઓછો 8-character password જરૂરી છે.")
-            elif one("SELECT id FROM users WHERE LOWER(username)=LOWER(:u)",{"u":username.strip()}): st.error("Username પહેલેથી છે.")
-            else: run("INSERT INTO users(username,password_hash,role,active) VALUES(:u,:p,:r,1)",{"u":username.strip(),"p":generate_password_hash(password),"r":role}); st.success("User create થયો."); st.rerun()
-    df=q("SELECT id AS ID,username AS Username,role AS Role,active AS Active,created_at AS \"Created At\" FROM users ORDER BY username")
-    st.dataframe(df,use_container_width=True,hide_index=True)
+    if not is_admin():
+        st.error("આ વિભાગ ફક્ત Main Admin માટે છે.")
+        return
+    st.title("Admin Panel / User Access")
+    st.caption("અહીંથી login username/password, role અને user access નિયંત્રિત કરો. Login screen પર Forgot Password નથી.")
+    with st.expander("Create New User", expanded=True):
+        with st.form("new_user"):
+            c=st.columns(3)
+            username=c[0].text_input("Username", key="create_username")
+            password=c[1].text_input("Password (minimum 10 characters)",type="password",key="create_password")
+            role=c[2].selectbox("Role",["staff","admin"],format_func=lambda x:"Staff" if x=="staff" else "Admin",key="create_role")
+            if st.form_submit_button("Create User",type="primary"):
+                if not username.strip() or len(password)<10:
+                    st.error("Username અને ઓછામાં ઓછો 10-character password જરૂરી છે.")
+                elif one("SELECT id FROM users WHERE LOWER(username)=LOWER(:u)",{"u":username.strip()}):
+                    st.error("આ username પહેલેથી છે.")
+                else:
+                    run("INSERT INTO users(username,password_hash,role,active) VALUES(:u,:p,:r,1)",{"u":username.strip(),"p":generate_password_hash(password),"r":role})
+                    st.success("User create થયો.")
+                    st.rerun()
+    df=q('SELECT id AS ID,username AS Username,role AS Role,active AS Active,created_at AS "Created At" FROM users ORDER BY username')
+    st.subheader("Existing Users")
+    st.dataframe(df.drop(columns=["ID"], errors="ignore"),use_container_width=True,hide_index=True)
     if not df.empty:
-        uid=st.selectbox("Select User",df.ID.tolist(),format_func=lambda x:df.loc[df.ID==x,"Username"].iloc[0])
-        if st.button("Enable / Disable Selected User"):
-            if int(uid)==int(current_user()["id"]): st.error("તમારા પોતાના account ને disable કરી શકતા નથી.")
+        uid=st.selectbox("Select User",df.ID.tolist(),format_func=lambda x:df.loc[df.ID==x,"Username"].iloc[0],key="admin_selected_user")
+        selected=one("SELECT id,username,role,active FROM users WHERE id=:id",{"id":int(uid)})
+        with st.form("edit_user_credentials"):
+            st.write(f"Selected user: **{selected['username']}**")
+            new_username=st.text_input("Change Username",value=selected["username"])
+            new_password=st.text_input("Set New Password (leave blank to keep current)",type="password")
+            new_role=st.selectbox("Role",["staff","admin"],index=0 if selected["role"]=="staff" else 1)
+            active=st.checkbox("User can login",value=bool(selected["active"]))
+            save=st.form_submit_button("Save User Settings",type="primary")
+        if save:
+            if not new_username.strip():
+                st.error("Username ખાલી ન રાખો.")
+            elif len(new_password)>0 and len(new_password)<10:
+                st.error("નવો password ઓછામાં ઓછો 10 characters નો હોવો જોઈએ.")
+            elif one("SELECT id FROM users WHERE LOWER(username)=LOWER(:u) AND id<>:id",{"u":new_username.strip(),"id":int(uid)}):
+                st.error("આ username બીજા user દ્વારા વપરાય છે.")
+            elif int(uid)==int(current_user()["id"]) and not active:
+                st.error("તમારા પોતાના logged-in admin account ને disable કરી શકતા નથી.")
             else:
-                old=int(one("SELECT active FROM users WHERE id=:id",{"id":int(uid)})["active"]); run("UPDATE users SET active=:v WHERE id=:id",{"v":0 if old else 1,"id":int(uid)}); st.rerun()
+                params={"u":new_username.strip(),"r":new_role,"a":1 if active else 0,"id":int(uid)}
+                run("UPDATE users SET username=:u,role=:r,active=:a WHERE id=:id",params)
+                if new_password:
+                    run("UPDATE users SET password_hash=:p WHERE id=:id",{"p":generate_password_hash(new_password),"id":int(uid)})
+                if int(uid)==int(current_user()["id"]):
+                    st.session_state["authenticated_user"].update({"username":new_username.strip(),"role":new_role})
+                st.success("User settings update થઈ.")
+                st.rerun()
 
 
 BACKUP_TABLES = ["agents", "parties", "sku_master", "orders", "order_items", "order_item_sizes", "order_dispatches", "users"]
@@ -751,7 +831,18 @@ def make_sqlite_database_backup():
 
 
 def page_settings():
-    st.title("Utilities / Backup & Restore")
+    st.title("Utilities / Admin Panel")
+    if not is_admin():
+        st.error("Utilities ફક્ત Main Admin માટે ઉપલબ્ધ છે.")
+        return
+    user_tab, backup_tab = st.tabs(["User Name & Password", "Backup & Restore"])
+    with user_tab:
+        page_users()
+    with backup_tab:
+        page_backup_restore()
+
+def page_backup_restore():
+    st.title("Backup & Restore")
     st.info("તમારો સંપૂર્ણ app data backup ZIP માં download કરો. પછી જરૂર પડે ત્યારે આ ZIP upload કરીને data restore કરી શકો છો.")
     st.subheader("Database Status")
     st.write(f"Database engine: **{engine.dialect.name}**")
@@ -785,7 +876,6 @@ def page_settings():
         except Exception as e:
             st.error(f"Restore નિષ્ફળ ગયું: {e}")
     st.caption("નોંધ: Shubhvastra backup ZIP અથવા આ app માંથી download કરેલી compatible .db/.sqlite/.sqlite3 ફાઇલ upload કરો. .rar અને CSV સીધા restore થતા નથી. જૂના/અલગ schema વાળા database માટે migration જરૂરી હોઈ શકે છે.")
-    st.warning("TEST MODE: login/password બંધ છે. આ URL જેને મળશે તે app access કરી શકશે. Live business data માટે authentication ચાલુ કરાવશો.")
 
 
 # Apply navigation requests before creating the sidebar widget, so buttons can switch pages reliably.
@@ -794,13 +884,26 @@ if "pending_page" in st.session_state:
     st.session_state["page"] = st.session_state["main_navigation"]
 
 header()
-st.warning("TEST MODE: Login / Admin password જરૂરી નથી. આ માત્ર testing માટે છે; app URL ધરાવનાર કોઈપણ વ્યક્તિ data જોઈ/બદલી શકે છે.")
-menu=["Dashboard","Party Master","Agent Master","Item Master","Order Form","Orders","Order Details","Pending to Dispatched","Order Reports","Utilities / Backup"]
+if not require_login():
+    if int(one("SELECT COUNT(*) AS n FROM users WHERE role='admin' AND active=1")["n"]) == 0:
+        show_first_admin_setup()
+    else:
+        show_login()
+    st.stop()
+
+user=current_user()
+menu=["Dashboard","Party Master","Agent Master","Item Master","Order Form","Orders","Order Details","Pending to Dispatched","Order Reports"]
+if is_admin(): menu.append("Utilities / Admin Panel")
 with st.sidebar:
     logo=BASE/"static"/"shubhvastra_logo.png"
     if logo.exists(): st.image(str(logo),width=125)
     st.markdown("### SHUBHVASTRA")
-    st.caption("Order Management · 2026 · Test Mode")
+    st.caption(f"Order Management · 2026 · {user['role'].title()}")
+    st.caption(f"Logged in: {user['username']}")
+    if st.button("Logout",use_container_width=True):
+        st.session_state.pop("authenticated_user",None)
+        st.session_state.pop("main_navigation",None)
+        st.rerun()
     default=st.session_state.get("page","Dashboard")
     if default not in menu: default="Dashboard"
     page=st.radio("Navigation",menu,index=menu.index(default),key="main_navigation")
@@ -814,6 +917,6 @@ elif page=="Orders": page_orders()
 elif page=="Order Details": page_order_details()
 elif page=="Pending to Dispatched": page_dispatch()
 elif page=="Order Reports": page_reports()
-elif page=="Utilities / Backup": page_settings()
+elif page=="Utilities / Admin Panel": page_settings()
 
-st.markdown("<div style='text-align:center;color:#8b98a9;font-size:11px;padding:20px'>SHUBHVASTRA · TEST MODE · Login disabled</div>",unsafe_allow_html=True)
+st.markdown(f"<div style='text-align:center;color:#8b98a9;font-size:11px;padding:20px'>SHUBHVASTRA · Secure Login · {user['role'].title()}</div>",unsafe_allow_html=True)

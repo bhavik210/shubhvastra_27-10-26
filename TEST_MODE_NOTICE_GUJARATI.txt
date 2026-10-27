@@ -1,7 +1,4 @@
-TEST MODE — SHUBHVASTRA
-
-આ build માં Admin / Password login જરૂરી નથી. App ખોલતાં સીધું Dashboard આવશે.
-
-WARNING: જે કોઈને app URL મળશે તે data જોઈ અને બદલી શકે છે. માત્ર testing માટે વાપરો. Real staff use પહેલાં authentication enable કરો.
-
-Streamlit Cloud પર DATABASE_URL વગરનું SQLite testing data persistent/shared નથી. Multi-staff અથવા સાચા orders માટે managed PostgreSQL configure કરો.
+જૂની TEST MODE notice હવે લાગુ પડતી નથી.
+આ build માં login ફરજિયાત છે અને active Admin દ્વારા જ Utilities/Admin Panel ખોલી શકાય છે.
+પ્રથમ વખત database માં active Admin ન હોય ત્યારે Initial Admin Setup screen પરથી Main Admin બનાવો.
+Login screen પર Forgot Password વિકલ્પ નથી.
