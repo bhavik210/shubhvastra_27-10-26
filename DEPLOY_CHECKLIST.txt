@@ -1,0 +1,10 @@
+SHUBHVASTRA DEPLOYMENT CHECKLIST — TEST MODE
+[ ] Create a GitHub repository (private is recommended)
+[ ] Upload extracted project files to repository root
+[ ] Confirm app.py and requirements.txt are at repository root
+[ ] Deploy app.py from Streamlit Community Cloud
+[ ] Login is disabled in this testing build; no admin password required
+[ ] For persistent/shared data, create managed PostgreSQL and configure DATABASE_URL in Streamlit Cloud Secrets
+[ ] Migrate party_reporting.db using migrate_sqlite_to_postgres.py before importing real data
+[ ] Test party, SKU, order, partial dispatch, CSV and reports with sample data
+[ ] Before real staff use, enable authentication and set access restrictions
