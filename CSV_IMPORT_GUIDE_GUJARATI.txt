@@ -1,0 +1,27 @@
+SHUBHVASTRA 2026 — CSV IMPORT GUIDE (Gujarati)
+
+1) ORDER FORM CSV
+- Order Form માં Create Order CSV દબાવો અથવા આપેલી Shubhvastra_Order_Import_Template.csv ખોલો.
+- એક item માટે એક row ભરો. એક જ Order Number હેઠળ ઘણા items હોય તો Order Number, Date અને Party details દરેક row માં સમાન રાખો.
+- Order Number ફરજિયાત અને unique હોવો જોઈએ. પહેલેથી database માં હોય તે order number import નહીં થાય.
+- Party Name, Party City અને Party Phone હાલના Party Master સાથે match થવા જોઈએ.
+- Order Date DD-MM-YYYY format માં આપો.
+- M Qty / L Qty / XL Qty / XXL Qty માં quantity આપો; જે size ન હોય તે blank અથવા 0 રાખો.
+- Packaging માં માન્ય નામો semicolon થી અલગ લખો: Chain Bag; Box Packing; Sherwani Packing
+- Additional Order Details દરેક row માં તે Order Number માટે સમાન રાખો.
+- CSV Excel માં UTF-8 CSV format માં save કરો. Header row ના નામ બદલશો નહીં.
+- Import Order CSV orders ને database માં સીધા create કરે છે. Duplicate/order/party validation fail થાય તો import અટકે છે.
+
+2) PENDING TO DISPATCHED CSV
+- Pending to Dispatch tab માં Create Dispatch CSV દબાવો અથવા Shubhvastra_Dispatch_Import_Template.csv ખોલો.
+- દરેક dispatch line માટે એક row. Order Number + Party Name + Particulars + Order Size હાલના pending order સાથે match થવા જોઈએ.
+- Order Size: M, L, XL, XXL અથવા M (38), L (40), XL (42), XXL (44) લખી શકાય.
+- Dispatch Qty ઉપલબ્ધ pending quantity કરતાં વધુ ન હોવી જોઈએ.
+- Dispatch Date DD-MM-YYYY; ખાલી રાખશો તો આજની તારીખ લાગશે.
+- Invoice Number અને Details optional છે.
+- Import પહેલાં validation થાય છે; પછી confirmation બાદ જ dispatch records save થાય છે.
+
+મહત્વપૂર્ણ:
+- પહેલાં database backup લો.
+- CSV ને Excel માં edit કર્યા પછી CSV format માં જ Save કરો, XLSX નહીં.
+- Party Master માં Party પહેલાંથી બનાવેલી હોવી જોઈએ.

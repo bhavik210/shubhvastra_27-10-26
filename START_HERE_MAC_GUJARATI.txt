@@ -1,0 +1,23 @@
+SHUBHVASTRA NEW VERSION 2026 — MACBOOK SETUP
+
+1. ZIP Extract કરો.
+2. Python 3 with Tkinter install કરો: https://www.python.org/downloads/macos/
+3. જૂના software folderમાંથી party_reporting.db ની backup copy રાખો.
+4. તમારી existing party_reporting.db ફાઇલ app.pyની બાજુમાં મૂકો. ZIPમાં database નથી.
+5. run_mac.command પર double-click કરો. જરૂરી હોય તો Right Click > Open.
+6. ReportLab missing હોય તો launcher install કરવાનો પ્રયત્ન કરશે; Internet ચાલુ રાખો.
+
+નવી સુવિધાઓ:
+- Party duplicate prevention: party name + phone + city + state ચારેય same હોય તો duplicate રોકાય છે.
+- Editable Order Number; duplicate order number રોકાય છે.
+- Save Order / Save PDF.
+- Maximum 200 item rows.
+- Find / Edit Order અને Delete Order.
+- Dispatch history ધરાવતા orderનું edit/delete સુરક્ષા માટે રોકાય છે.
+
+નોંધ: GUIનું સંપૂર્ણ end-to-end પરીક્ષણ MacBook પર હજી કરવાનું બાકી છે. જૂની database overwrite ન કરશો અને પહેલાં backup લો.
+
+CSV IMPORT UPDATE:
+- Order Form માં Create Order CSV / Import Order CSV છે.
+- Pending to Dispatch માં Create Dispatch CSV / Import Dispatch CSV છે.
+- CSV format અને જરૂરી columns માટે CSV_IMPORT_GUIDE_GUJARATI.txt જુઓ.
