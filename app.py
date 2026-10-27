@@ -31,7 +31,27 @@ CSS = """
 .metric-label{font-size:.82rem;color:#64748b;font-weight:650}.metric-value{font-size:1.9rem;font-weight:800;color:#132b4a;margin-top:5px}
 .section-card{background:white;border:1px solid #dfe6ef;border-radius:12px;padding:16px 18px;margin-bottom:12px}
 h1,h2,h3{color:#132b4a!important}div.stButton>button[kind="primary"]{background:#1769aa;border-color:#1769aa}
-[data-testid="stDataFrame"]{background:white;border-radius:10px} .small-note{color:#64748b;font-size:.83rem}
+[data-testid="stDataFrame"]{background:white;border-radius:10px;border:1px solid #dbe4ef;overflow:hidden}
+.small-note{color:#52657d;font-size:.86rem}
+/* Professional contrast: readable alerts, buttons, labels and form controls */
+[data-testid="stAlert"]{border-radius:10px!important;border:1px solid #cbd8e8!important;box-shadow:0 2px 8px rgba(19,43,74,.04)}
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"],
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"] strong{color:#17324f!important;opacity:1!important}
+[data-testid="stAlert"] svg{fill:currentColor!important}
+[data-testid="stAlert"]:has(svg[ data-testid="stIconWarning"]){background:#fff7df!important;border-color:#f0d58a!important}
+[data-testid="stAlert"]:has(svg[ data-testid="stIconInfo"]){background:#eaf4ff!important;border-color:#b8d8fb!important}
+[data-testid="stAlert"]:has(svg[ data-testid="stIconSuccess"]){background:#eaf8ef!important;border-color:#b8e2c5!important}
+[data-testid="stAlert"]:has(svg[ data-testid="stIconError"]){background:#fff0f0!important;border-color:#f1b8b8!important}
+.stApp, [data-testid="stMarkdownContainer"], [data-testid="stText"], label, p, li{color:#1d2a3b}
+[data-testid="stWidgetLabel"] p, [data-testid="stWidgetLabel"] label{color:#243b53!important;font-weight:600!important}
+input, textarea, [data-baseweb="select"]>div{color:#172b43!important;background:#fff!important;border-color:#cbd5e1!important}
+[data-testid="stDownloadButton"] button, div.stButton>button, [data-testid="stFormSubmitButton"] button{background:#fff!important;color:#17406b!important;border:1px solid #b8c8da!important;border-radius:8px!important;font-weight:600!important;min-height:2.45rem;transition:all .15s ease}
+div.stButton>button:hover, [data-testid="stDownloadButton"] button:hover, [data-testid="stFormSubmitButton"] button:hover{background:#eaf3fb!important;border-color:#1769aa!important;color:#103d69!important}
+div.stButton>button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"], [data-testid="stDownloadButton"] button[kind="primary"]{background:#1769aa!important;color:#fff!important;border-color:#1769aa!important}
+div.stButton>button[kind="primary"] *, [data-testid="stFormSubmitButton"] button[kind="primary"] *{color:#fff!important}
+[data-testid="stDataFrame"] *{color:#1d2a3b}
+hr{border-color:#dbe4ef!important}
 @media(max-width:800px){.block-container{padding-left:.7rem;padding-right:.7rem}.brandtitle{font-size:1.05rem}}
 </style>
 """
