@@ -22,9 +22,12 @@ CSS = """
 <style>
 :root{--navy:#132b4a;--blue:#1769aa;--blue2:#eaf3fb;--line:#dfe6ef;--muted:#64748b}
 .stApp{background:#f3f6fa;color:#1d2a3b}.block-container{padding-top:1rem;max-width:1500px}
-[data-testid="stSidebar"]{background:#132b4a;color:#fff}[data-testid="stSidebar"] *{color:inherit}
-[data-testid="stSidebar"] [data-testid="stRadio"] label{padding:.45rem .55rem;border-radius:7px}
-[data-testid="stSidebar"] [data-testid="stRadio"] label:hover{background:#254467}
+[data-testid="stSidebar"]{background:#f8f6ef!important;color:#111827!important;border-right:1px solid #e5e0d5}
+[data-testid="stSidebar"] *{color:#111827!important}
+[data-testid="stSidebar"] [data-testid="stRadio"] label{padding:.5rem .6rem;border-radius:7px;color:#111827!important}
+[data-testid="stSidebar"] [data-testid="stRadio"] label:hover{background:#eae5d8!important}
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-checked="true"]{background:#e5dfd0!important;font-weight:700!important}
+[data-testid="stSidebar"] [data-testid="stRadio"] label p{color:#111827!important}
 .brandbar{background:#132b4a;color:white;border-radius:12px;padding:15px 20px;display:flex;align-items:center;gap:14px;margin-bottom:1rem}
 .brandtitle{font-weight:800;font-size:1.35rem;letter-spacing:.5px}.brandsub{color:#c5d5e8;font-size:.82rem}
 .metric-card{background:white;border:1px solid #dfe6ef;border-radius:12px;padding:16px 18px;box-shadow:0 3px 12px #20344c07}
@@ -620,13 +623,8 @@ def make_full_backup():
     return mem.getvalue()
 
 
-def restore_full_backup(uploaded_bytes):
-    """Restore a ZIP created by make_full_backup, replacing current app table data."""
-    import zipfile
-    with zipfile.ZipFile(io.BytesIO(uploaded_bytes), "r") as zf:
-        if "shubhvastra_backup.json" not in zf.namelist():
-            raise ValueError("આ ZIP Shubhvastra app backup નથી. Utilities માંથી બનાવેલી backup ZIP પસંદ કરો.")
-        payload = json.loads(zf.read("shubhvastra_backup.json").decode("utf-8"))
+def _apply_backup_payload(payload):
+    """Validate and restore a payload into the configured database."""
     if payload.get("format") != "shubhvastra_backup" or payload.get("version") != BACKUP_FORMAT_VERSION:
         raise ValueError("Backup format/version ઓળખી શકાયું નથી.")
     tables = payload.get("tables", {})
@@ -639,7 +637,7 @@ def restore_full_backup(uploaded_bytes):
         allowed = {col["name"] for col in inspector.get_columns(table_name)}
         for row in tables[table_name]:
             if not isinstance(row, dict) or not set(row).issubset(allowed):
-                raise ValueError(f"{table_name} table ના columns હાલના app સાથે મેળ ખાતા નથી.")
+                raise ValueError(f"{table_name} table ના columns હાલના app સાથે મેળ ખાતા નથી. જૂના database માટે migration જરૂરી હોઈ શકે છે.")
     # Delete children first to satisfy foreign keys, then restore parents first.
     with engine.begin() as conn:
         for table_name in reversed(BACKUP_TABLES):
@@ -656,11 +654,53 @@ def restore_full_backup(uploaded_bytes):
             stmt = text(f'INSERT INTO "{table_name}" ({col_sql}) VALUES ({val_sql})')
             for row in rows:
                 conn.execute(stmt, {f'v{i}': row.get(col) for i, col in enumerate(columns)})
-        # Keep PostgreSQL generated IDs working after restoring explicit IDs.
         if engine.dialect.name == "postgresql":
             for table_name in BACKUP_TABLES:
                 conn.execute(text(f"SELECT setval(pg_get_serial_sequence(:tbl, 'id'), COALESCE((SELECT MAX(id) FROM \"{table_name}\"), 1), (SELECT MAX(id) IS NOT NULL FROM \"{table_name}\"))"), {"tbl": table_name})
     return {name: len(tables[name]) for name in BACKUP_TABLES}
+
+
+def restore_full_backup(uploaded_bytes, filename="backup.zip"):
+    """Restore app ZIP backups or SQLite .db/.sqlite/.sqlite3 files."""
+    import zipfile, sqlite3
+    if uploaded_bytes[:16] == b"SQLite format 3\x00" or filename.lower().endswith((".db", ".sqlite", ".sqlite3")):
+        source = sqlite3.connect(":memory:")
+        try:
+            source.deserialize(uploaded_bytes)
+            available = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            missing = [name for name in BACKUP_TABLES if name not in available]
+            if missing:
+                raise ValueError("આ database માં Shubhvastra ના જરૂરી tables નથી: " + ", ".join(missing) + ". જો આ જૂની party_reporting.db છે તો પહેલા migration format માં convert કરવી પડશે.")
+            payload = {"format": "shubhvastra_backup", "version": BACKUP_FORMAT_VERSION, "tables": {}}
+            for name in BACKUP_TABLES:
+                cursor = source.execute(f'SELECT * FROM "{name}"')
+                columns = [item[0] for item in cursor.description]
+                payload["tables"][name] = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        finally:
+            source.close()
+        return _apply_backup_payload(payload)
+    try:
+        with zipfile.ZipFile(io.BytesIO(uploaded_bytes), "r") as zf:
+            if "shubhvastra_backup.json" not in zf.namelist():
+                raise ValueError("આ ZIP માં Shubhvastra backup મળ્યું નથી. Full Backup ZIP અથવા .db/.sqlite database file પસંદ કરો.")
+            payload = json.loads(zf.read("shubhvastra_backup.json").decode("utf-8"))
+    except zipfile.BadZipFile as exc:
+        raise ValueError("આ file ઓળખી શકાતી નથી. Shubhvastra backup .zip અથવા compatible .db/.sqlite/.sqlite3 ફાઇલ upload કરો. .rar સીધું support થતું નથી.") from exc
+    return _apply_backup_payload(payload)
+
+
+def make_sqlite_database_backup():
+    """Export a portable SQLite database snapshot from the live app tables."""
+    import sqlite3
+    db = sqlite3.connect(":memory:")
+    try:
+        for table_name in BACKUP_TABLES:
+            frame = q(f'SELECT * FROM "{table_name}"')
+            frame.to_sql(table_name, db, if_exists="replace", index=False)
+        db.commit()
+        return db.serialize()
+    finally:
+        db.close()
 
 
 def page_settings():
@@ -679,21 +719,25 @@ def page_settings():
         st.download_button("⬇️ Download Full Backup ZIP", backup_bytes,
                            file_name=f"shubhvastra_backup_{date.today().isoformat()}.zip",
                            mime="application/zip", type="primary", use_container_width=False)
+        sqlite_bytes = make_sqlite_database_backup()
+        st.download_button("⬇️ Download Database File (.db)", sqlite_bytes,
+                           file_name=f"shubhvastra_database_{date.today().isoformat()}.db",
+                           mime="application/vnd.sqlite3", use_container_width=False)
     except Exception as e:
         st.error(f"Backup બનાવવામાં સમસ્યા: {e}")
     st.divider()
     st.subheader("2. Restore / Upload Previous Backup")
     st.warning("Restore કરવાથી હાલના app ના records replace થશે. Restore કરતાં પહેલાં ઉપરથી હાલનો backup download કરી રાખો.")
-    uploaded_backup = st.file_uploader("Shubhvastra Full Backup ZIP upload કરો", type=["zip"], key="full_backup_restore")
+    uploaded_backup = st.file_uploader("Backup ZIP અથવા database file (.db, .sqlite, .sqlite3) upload કરો", type=["zip", "db", "sqlite", "sqlite3"], key="full_backup_restore")
     confirm_restore = st.checkbox("હું સમજું છું કે Restore કરવાથી હાલનો data replace થશે.", key="confirm_full_restore")
     if st.button("Restore Uploaded Backup", type="primary", disabled=(uploaded_backup is None or not confirm_restore)):
         try:
-            counts = restore_full_backup(uploaded_backup.getvalue())
+            counts = restore_full_backup(uploaded_backup.getvalue(), uploaded_backup.name)
             st.success("Backup restore સફળ થયું. Restored records: " + " · ".join(f"{name}: {count}" for name, count in counts.items()))
             st.rerun()
         except Exception as e:
             st.error(f"Restore નિષ્ફળ ગયું: {e}")
-    st.caption("નોંધ: Restore માટે Utilities માંથી બનાવેલી Shubhvastra backup ZIP વાપરો. CSV અથવા કોઈપણ અજાણી .db ફાઇલ અહીં restore થતી નથી.")
+    st.caption("નોંધ: Shubhvastra backup ZIP અથવા આ app માંથી download કરેલી compatible .db/.sqlite/.sqlite3 ફાઇલ upload કરો. .rar અને CSV સીધા restore થતા નથી. જૂના/અલગ schema વાળા database માટે migration જરૂરી હોઈ શકે છે.")
     st.warning("TEST MODE: login/password બંધ છે. આ URL જેને મળશે તે app access કરી શકશે. Live business data માટે authentication ચાલુ કરાવશો.")
 
 
