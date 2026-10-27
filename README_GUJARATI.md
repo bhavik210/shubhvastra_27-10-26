@@ -48,3 +48,10 @@ Dashboard, Party Master, Agent Master, Item Master/SKU, Order Form, Orders, Orde
 
 ## નોંધ
 આ Streamlit version છે. Branding, module names અને core business flows જાળવ્યા છે, પરંતુ desktop software નો દરેક pixel અને દરેક advanced workflow સંપૂર્ણ સમાન છે એવો દાવો નથી. CSV/PDF, dispatch, reports અને database migration ને sample data વડે ચકાસો. Login disabled હોવાથી આ build માત્ર testing માટે છે.
+
+
+## Full Backup / Restore (Utilities)
+- Utilities / Backup & Restore માં `Download Full Backup ZIP` દ્વારા parties, agents, SKU, orders, order items, dispatch history અને users નો app-level backup લો.
+- Restore કરવા માટે આ જ app માંથી બનાવેલી ZIP upload કરો અને data replace confirmation checkbox પસંદ કરો. Restore હાલના records ને uploaded backup ના records થી replace કરે છે.
+- Restore પહેલાં હાલનો backup download કરી રાખવો. Backup ZIP માં business data હોઈ શકે છે, તેને સુરક્ષિત રાખો અને GitHub માં upload ન કરો.
+- આ restore feature app ના પોતાના backup ZIP માટે છે; arbitrary CSV અથવા જૂની `.db` ફાઇલ સીધી restore કરવા માટે નથી.

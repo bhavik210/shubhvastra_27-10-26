@@ -600,18 +600,100 @@ def page_users():
                 old=int(one("SELECT active FROM users WHERE id=:id",{"id":int(uid)})["active"]); run("UPDATE users SET active=:v WHERE id=:id",{"v":0 if old else 1,"id":int(uid)}); st.rerun()
 
 
+BACKUP_TABLES = ["agents", "parties", "sku_master", "orders", "order_items", "order_item_sizes", "order_dispatches", "users"]
+BACKUP_FORMAT_VERSION = 1
+
+
+def make_full_backup():
+    """Create a portable, app-level backup containing every application table."""
+    payload = {"format": "shubhvastra_backup", "version": BACKUP_FORMAT_VERSION,
+               "created_at": datetime.now().isoformat(timespec="seconds"),
+               "source_database": engine.dialect.name, "tables": {}}
+    for table_name in BACKUP_TABLES:
+        payload["tables"][table_name] = q(f'SELECT * FROM "{table_name}"').to_dict(orient="records")
+    raw = json.dumps(payload, ensure_ascii=False, default=str, indent=2).encode("utf-8")
+    mem = io.BytesIO()
+    import zipfile
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("shubhvastra_backup.json", raw)
+        zf.writestr("README.txt", "SHUBHVASTRA app backup. Restore this ZIP from Utilities / Backup & Restore. Keep this file private because it may contain business and user data.")
+    return mem.getvalue()
+
+
+def restore_full_backup(uploaded_bytes):
+    """Restore a ZIP created by make_full_backup, replacing current app table data."""
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(uploaded_bytes), "r") as zf:
+        if "shubhvastra_backup.json" not in zf.namelist():
+            raise ValueError("આ ZIP Shubhvastra app backup નથી. Utilities માંથી બનાવેલી backup ZIP પસંદ કરો.")
+        payload = json.loads(zf.read("shubhvastra_backup.json").decode("utf-8"))
+    if payload.get("format") != "shubhvastra_backup" or payload.get("version") != BACKUP_FORMAT_VERSION:
+        raise ValueError("Backup format/version ઓળખી શકાયું નથી.")
+    tables = payload.get("tables", {})
+    if any(name not in tables or not isinstance(tables[name], list) for name in BACKUP_TABLES):
+        raise ValueError("Backup માં જરૂરી tables ખૂટે છે અથવા data format ખોટો છે.")
+    inspector = inspect(engine)
+    for table_name in BACKUP_TABLES:
+        if not inspector.has_table(table_name):
+            raise ValueError(f"Database માં {table_name} table મળ્યું નથી. App ને પહેલાં reboot કરો.")
+        allowed = {col["name"] for col in inspector.get_columns(table_name)}
+        for row in tables[table_name]:
+            if not isinstance(row, dict) or not set(row).issubset(allowed):
+                raise ValueError(f"{table_name} table ના columns હાલના app સાથે મેળ ખાતા નથી.")
+    # Delete children first to satisfy foreign keys, then restore parents first.
+    with engine.begin() as conn:
+        for table_name in reversed(BACKUP_TABLES):
+            conn.execute(text(f'DELETE FROM "{table_name}"'))
+        for table_name in BACKUP_TABLES:
+            rows = tables[table_name]
+            if not rows:
+                continue
+            columns = list(rows[0].keys())
+            if not columns:
+                continue
+            col_sql = ", ".join(f'"{c}"' for c in columns)
+            val_sql = ", ".join(f':v{i}' for i in range(len(columns)))
+            stmt = text(f'INSERT INTO "{table_name}" ({col_sql}) VALUES ({val_sql})')
+            for row in rows:
+                conn.execute(stmt, {f'v{i}': row.get(col) for i, col in enumerate(columns)})
+        # Keep PostgreSQL generated IDs working after restoring explicit IDs.
+        if engine.dialect.name == "postgresql":
+            for table_name in BACKUP_TABLES:
+                conn.execute(text(f"SELECT setval(pg_get_serial_sequence(:tbl, 'id'), COALESCE((SELECT MAX(id) FROM \"{table_name}\"), 1), (SELECT MAX(id) IS NOT NULL FROM \"{table_name}\"))"), {"tbl": table_name})
+    return {name: len(tables[name]) for name in BACKUP_TABLES}
+
+
 def page_settings():
     st.title("Utilities / Backup & Restore")
-    st.info("Cloud માં live data PostgreSQL માં રહે છે. GitHub માં database password અથવા database file upload ન કરશો.")
+    st.info("તમારો સંપૂર્ણ app data backup ZIP માં download કરો. પછી જરૂર પડે ત્યારે આ ZIP upload કરીને data restore કરી શકો છો.")
     st.subheader("Database Status")
     st.write(f"Database engine: **{engine.dialect.name}**")
     st.write(f"Database URL configured: **{'Yes' if db_url() else 'No — local SQLite mode'}**")
-    if engine.dialect.name=="sqlite": st.warning("Local SQLite માત્ર local testing માટે છે. Streamlit Cloud પર DATABASE_URL માં managed PostgreSQL connection string સેટ કરો.")
-    if is_admin():
-        for table_name in ["agents","parties","sku_master","orders","order_items","order_item_sizes","order_dispatches","users"]:
-            df=q(f'SELECT * FROM "{table_name}"')
-            df_download(df,f"backup_{table_name}.csv",f"Download {table_name} CSV")
-        st.caption("આ CSV exports table-wise backup માટે છે; full PostgreSQL backup માટે managed database provider નું backup/export વાપરો.")
+    if engine.dialect.name=="sqlite":
+        st.warning("Local SQLite mode છે. Streamlit Cloud પર permanent/shared data માટે managed PostgreSQL અને DATABASE_URL configure કરવું જરૂરી છે.")
+    st.divider()
+    st.subheader("1. Full Backup Download")
+    st.write("Party, Agent, SKU, Orders, order items, dispatch history અને app users સહિત તમામ tables નો backup.")
+    try:
+        backup_bytes = make_full_backup()
+        st.download_button("⬇️ Download Full Backup ZIP", backup_bytes,
+                           file_name=f"shubhvastra_backup_{date.today().isoformat()}.zip",
+                           mime="application/zip", type="primary", use_container_width=False)
+    except Exception as e:
+        st.error(f"Backup બનાવવામાં સમસ્યા: {e}")
+    st.divider()
+    st.subheader("2. Restore / Upload Previous Backup")
+    st.warning("Restore કરવાથી હાલના app ના records replace થશે. Restore કરતાં પહેલાં ઉપરથી હાલનો backup download કરી રાખો.")
+    uploaded_backup = st.file_uploader("Shubhvastra Full Backup ZIP upload કરો", type=["zip"], key="full_backup_restore")
+    confirm_restore = st.checkbox("હું સમજું છું કે Restore કરવાથી હાલનો data replace થશે.", key="confirm_full_restore")
+    if st.button("Restore Uploaded Backup", type="primary", disabled=(uploaded_backup is None or not confirm_restore)):
+        try:
+            counts = restore_full_backup(uploaded_backup.getvalue())
+            st.success("Backup restore સફળ થયું. Restored records: " + " · ".join(f"{name}: {count}" for name, count in counts.items()))
+            st.rerun()
+        except Exception as e:
+            st.error(f"Restore નિષ્ફળ ગયું: {e}")
+    st.caption("નોંધ: Restore માટે Utilities માંથી બનાવેલી Shubhvastra backup ZIP વાપરો. CSV અથવા કોઈપણ અજાણી .db ફાઇલ અહીં restore થતી નથી.")
     st.warning("TEST MODE: login/password બંધ છે. આ URL જેને મળશે તે app access કરી શકશે. Live business data માટે authentication ચાલુ કરાવશો.")
 
 
