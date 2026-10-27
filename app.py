@@ -273,8 +273,55 @@ def page_dashboard():
     for col,(label,sql) in zip(cols,stats):
         val=one(sql)["n"]
         with col: st.markdown(f"<div class='metric-card'><div class='metric-label'>{label}</div><div class='metric-value'>{val}</div></div>",unsafe_allow_html=True)
-    st.subheader("Recent Orders")
-    table("SELECT o.order_no AS \"Order No\",o.order_date AS \"Order Date\",p.party_name AS \"Party Name\",p.city AS City,p.state AS State,o.narration AS \"Additional Order Details\" FROM orders o JOIN parties p ON p.id=o.party_id ORDER BY o.order_no DESC LIMIT 15")
+    st.subheader("All Parties")
+    st.caption("Party list read-only છે. કોઈ field edit નહીં થાય; cell પસંદ કરીને Ctrl+C થી text copy કરી શકો છો.")
+    search = st.text_input(
+        "🔎 Search Party",
+        placeholder="Party name, phone, city, GST, agent, transport અથવા reference લખો...",
+        key="dashboard_party_search",
+    )
+    party_df = q("""
+        SELECT
+            p.party_name AS "Party Name",
+            p.phone_number AS "Phone Number",
+            p.city AS "City",
+            p.gst_number AS "GST Number",
+            COALESCE(a.agent_name, '') AS "Agent Name",
+            p.transport_details AS "Transport Name",
+            p.transport_gst_number AS "Transport ID",
+            p.reference AS "Reference",
+            p.address AS "Address"
+        FROM parties p
+        LEFT JOIN agents a ON a.id = p.agent_id
+        ORDER BY p.party_name COLLATE NOCASE
+    """)
+    if search.strip() and not party_df.empty:
+        needle = search.strip().casefold()
+        mask = party_df.fillna("").astype(str).apply(
+            lambda col: col.str.casefold().str.contains(needle, regex=False)
+        ).any(axis=1)
+        party_df = party_df.loc[mask].reset_index(drop=True)
+    st.caption(f"કુલ {len(party_df)} પાર્ટી મળ્યા.")
+    st.dataframe(
+        party_df.fillna(""),
+        use_container_width=True,
+        hide_index=True,
+        height=560,
+        key="dashboard_all_parties_readonly",
+        column_config={
+            "Party Name": st.column_config.TextColumn("Party Name", width="large"),
+            "Phone Number": st.column_config.TextColumn("Phone Number", width="medium"),
+            "City": st.column_config.TextColumn("City", width="medium"),
+            "GST Number": st.column_config.TextColumn("GST Number", width="medium"),
+            "Agent Name": st.column_config.TextColumn("Agent Name", width="medium"),
+            "Transport Name": st.column_config.TextColumn("Transport Name", width="medium"),
+            "Transport ID": st.column_config.TextColumn("Transport ID", width="medium"),
+            "Reference": st.column_config.TextColumn("Reference", width="small"),
+            "Address": st.column_config.TextColumn("Address", width="large"),
+        },
+    )
+    if not party_df.empty:
+        df_download(party_df, "shubhvastra_all_parties.csv", "Download Party List CSV")
 
 
 def page_agents():
