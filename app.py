@@ -10,7 +10,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as PDFImage
 
 BASE = Path(__file__).resolve().parent
 SIZES = ["M", "L", "XL", "XXL"]
@@ -256,7 +256,18 @@ def order_pdf_bytes(order, items_df):
     small = styles["BodyText"]
     small.fontSize = 8
     small.leading = 10
-    story = [Paragraph("SHUBHVASTRA — ORDER FORM", styles["Title"]), Spacer(1, 3*mm)]
+    # Professional PDF header: Trishiv logo on the left, Shubhvastra logo on the right.
+    app_dir = BASE
+    trishiv_logo = app_dir / "static" / "trishiv_logo.jpg"
+    shubhvastra_logo = app_dir / "static" / "shubhvastra_logo.png"
+    logo_left = PDFImage(str(trishiv_logo), width=38*mm, height=30*mm, kind="proportional") if trishiv_logo.exists() else Paragraph("<b>TRISHIV ENTERPRISE LLP</b>", small)
+    logo_right = PDFImage(str(shubhvastra_logo), width=49*mm, height=24*mm, kind="proportional") if shubhvastra_logo.exists() else Paragraph("<b>SHUBHVASTRA</b>", small)
+    brand_row = Table([[logo_left, logo_right]], colWidths=[95*mm, 95*mm], hAlign="LEFT")
+    brand_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(0,0),(0,0),"LEFT"),("ALIGN",(1,0),(1,0),"RIGHT"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
+    title_style = ParagraphStyle("CompactOrderTitle", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=12, leading=14, alignment=TA_CENTER, spaceBefore=2, spaceAfter=5)
+    story = [brand_row, Spacer(1, 2*mm), Paragraph("ORDER FORM", title_style), Spacer(1, 2*mm)]
+    company_style = ParagraphStyle("CompanyContact", parent=small, fontSize=8, leading=10, textColor=colors.HexColor("#333333"), spaceAfter=1)
+    story.extend([Paragraph("<b>Address:</b> 2005 New Sardar Traders Market (NSTM), Puna Kumbhariya Road, Surat 395010", company_style), Paragraph("<b>Phone Number:</b> 9537510757 (Bhavik), 9099444455 (Nimesh)", company_style), Spacer(1, 3*mm)])
     party_data = [
         [Paragraph(f"<b>Party Name:</b> {order.get('party_name','')}", small), Paragraph(f"<b>Order Number:</b> {order.get('order_no','')}", small)],
         [Paragraph(f"<b>Address:</b> {order.get('address','')}", small), Paragraph(f"<b>Order Date:</b> {str(order.get('order_date',''))[:10]}", small)],
@@ -501,8 +512,6 @@ def page_sku():
 
 def page_order_form(edit_id=None):
     st.title("New Order" if not edit_id else f"Edit Order #{edit_id}")
-    if st.button("📋 Order List", key="new_order_list_btn"):
-        st.session_state["pending_page"] = "Orders"; st.rerun()
     parties=get_parties(); skus=get_skus()
     if parties.empty: st.warning("Order બનાવવા પહેલાં Party Master માં Party ઉમેરો."); return
     existing=one("SELECT * FROM orders WHERE id=:id",{"id":int(edit_id)}) if edit_id else None
@@ -524,7 +533,6 @@ def page_order_form(edit_id=None):
         rr=parties.loc[parties.id==pid]
         return rr.iloc[0].party_name if not rr.empty else str(pid)
     default_party=int(existing["party_id"]) if existing else 0
-    st.markdown('<div class="section-card">',unsafe_allow_html=True)
     top=st.columns([1.2,1,2])
     od_default=str(existing["order_date"])[:10] if existing else date.today().isoformat()
     od=top[0].date_input("Order Date *",value=date.fromisoformat(od_default),key=f"ord_date_{edit_id or 'new'}",disabled=bool(edit_id))
@@ -540,9 +548,7 @@ def page_order_form(edit_id=None):
         info[1].text_input("City",str(party.city),disabled=True,key=f"ord_city_{edit_id or 'new'}")
         info[2].text_input("State",str(party.state),disabled=True,key=f"ord_state_{edit_id or 'new'}")
         info[3].text_input("Agent",str(party.agent_name),disabled=True,key=f"ord_agent_{edit_id or 'new'}")
-    st.markdown('</div>',unsafe_allow_html=True)
     st.subheader("Item Details")
-    st.caption("શરૂઆતમાં 5 rows દેખાશે. છેલ્લી row માં SKU અથવા quantity ભરશો એટલે આગળની row આપમેળે ઉમેરાશે (મહત્તમ 999).")
     sku_options=[""]+skus.sku_number.tolist()
     rows=[]
     header=st.columns([.5,3,1,1,1,1,1.2,1.3,1.2])
@@ -572,7 +578,9 @@ def page_order_form(edit_id=None):
         disc_key=f"ord_disc_{ix}"
         if disc_key not in st.session_state: st.session_state[disc_key]=float(old.discount) if old is not None else 0.0
         disc=c[6].number_input("Discount",min_value=0.0,step=1.0,format="%.2f",key=disc_key,label_visibility="collapsed",disabled=bool(edit_id))
-        rate=c[7].number_input("WSP Rate",min_value=0.0,step=1.0,format="%.2f",key=rkey,label_visibility="collapsed",disabled=bool(edit_id))
+        # Rate is fetched from SKU Master and displayed read-only without +/- controls.
+        rate=float(st.session_state.get(rkey, rate_default) or 0)
+        c[7].text_input("WSP Rate", value=f"{rate:,.2f}" if rate else "", key=f"ord_rate_display_{ix}_{edit_id or 'new'}", label_visibility="collapsed", disabled=True, placeholder="Auto rate")
         qty=sum(sizes.values())
         c[8].markdown(f"**{qty}**")
         rows.append({"sku":sku,"rate":rate,"discount":disc,"sizes":sizes})
@@ -586,11 +594,15 @@ def page_order_form(edit_id=None):
         try: old_pack=json.loads(existing.get("packaging") or "[]")
         except Exception: old_pack=[]
     st.subheader("Packaging *")
-    packaging=st.multiselect("Select one or more packaging options",packaging_options,default=old_pack,key=f"ord_pack_{edit_id or 'new'}",disabled=bool(edit_id))
+    pack_cols=st.columns(3)
+    packaging=[]
+    for pi, pack_name in enumerate(packaging_options):
+        if pack_cols[pi].checkbox(pack_name, value=(pack_name in old_pack), key=f"ord_pack_check_{pi}_{edit_id or 'new'}", disabled=bool(edit_id)):
+            packaging.append(pack_name)
     st.subheader("GST *")
     gst_options=["5% GST","5-18% GST"]
     old_gst=str(existing.get("gst_type") or "") if existing else ""
-    gst=st.radio("Select GST option",gst_options,index=gst_options.index(old_gst) if old_gst in gst_options else None,horizontal=True,key=f"ord_gst_{edit_id or 'new'}",disabled=bool(edit_id))
+    gst=st.radio("GST *",gst_options,index=gst_options.index(old_gst) if old_gst in gst_options else None,horizontal=True,key=f"ord_gst_{edit_id or 'new'}",disabled=bool(edit_id),label_visibility="collapsed")
     narration=st.text_area("Additional Order Details",value=str(existing["narration"] or "") if existing else "",key=f"ord_narration_{edit_id or 'new'}",disabled=bool(edit_id))
     buttons=st.columns(3)
     save=buttons[0].button("Save Order" if not edit_id else "Save Item Changes",type="primary",use_container_width=True)

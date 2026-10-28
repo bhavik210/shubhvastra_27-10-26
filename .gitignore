@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+shubhvastra_local.db
+party_reporting.db
+*.sqlite
+*.sqlite3
+.streamlit/secrets.toml
+.DS_Store
