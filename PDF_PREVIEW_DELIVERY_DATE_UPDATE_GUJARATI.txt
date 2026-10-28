@@ -1,0 +1,10 @@
+SHUBHVASTRA UPDATE — PDF PREVIEW & DELIVERY DATE
+
+- ORDER FORM title is centered above both logos.
+- Trishiv Enterprise LLP logo is enlarged on the left; Shubhvastra logo stays on the right.
+- PDF party/order information is split into two structured tables:
+  1) Party details left; order number/date/delivery date right.
+  2) Transport name/ID left; GST/packaging right.
+- New Order includes a Delivery Date selector below GST.
+- Existing databases get a nullable delivery_date column on startup; existing records remain unchanged.
+- Delivery date is saved with new orders and shown in the PDF.

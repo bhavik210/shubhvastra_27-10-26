@@ -114,7 +114,7 @@ def init_db():
     stmts = [
       f"CREATE TABLE IF NOT EXISTS agents (id {identity}, agent_name VARCHAR(200) NOT NULL UNIQUE, phone_number VARCHAR(100) NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
       f"CREATE TABLE IF NOT EXISTS parties (id {identity}, party_name VARCHAR(250) NOT NULL, phone_number VARCHAR(100) NOT NULL, address TEXT NOT NULL DEFAULT '', city VARCHAR(150) NOT NULL DEFAULT '', state VARCHAR(150) NOT NULL DEFAULT '', gst_number VARCHAR(100) NOT NULL DEFAULT '', reference VARCHAR(30) NOT NULL DEFAULT 'DIRECT', transport_details TEXT NOT NULL DEFAULT '', transport_gst_number VARCHAR(100) NOT NULL DEFAULT '', agent_id INTEGER NULL REFERENCES agents(id) ON DELETE RESTRICT, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-      f"CREATE TABLE IF NOT EXISTS orders (id {identity}, order_no INTEGER NOT NULL UNIQUE, order_date DATE NOT NULL, party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE RESTRICT, packaging TEXT NOT NULL DEFAULT '[]', gst_type VARCHAR(30) NOT NULL DEFAULT '', narration TEXT NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, cancelled INTEGER NOT NULL DEFAULT 0)",
+      f"CREATE TABLE IF NOT EXISTS orders (id {identity}, order_no INTEGER NOT NULL UNIQUE, order_date DATE NOT NULL, delivery_date DATE NULL, party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE RESTRICT, packaging TEXT NOT NULL DEFAULT '[]', gst_type VARCHAR(30) NOT NULL DEFAULT '', narration TEXT NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, cancelled INTEGER NOT NULL DEFAULT 0)",
       f"CREATE TABLE IF NOT EXISTS order_items (id {identity}, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE, sr_no INTEGER NOT NULL, particulars VARCHAR(250) NOT NULL, piece_rate NUMERIC(12,2) NOT NULL DEFAULT 0, discount NUMERIC(12,2) NOT NULL DEFAULT 0)",
       f"CREATE TABLE IF NOT EXISTS order_item_sizes (id {identity}, order_item_id INTEGER NOT NULL REFERENCES order_items(id) ON DELETE CASCADE, size_code VARCHAR(10) NOT NULL, ordered_qty INTEGER NOT NULL CHECK(ordered_qty > 0), cancelled INTEGER NOT NULL DEFAULT 0, UNIQUE(order_item_id,size_code))",
       f"CREATE TABLE IF NOT EXISTS order_dispatches (id {identity}, order_size_id INTEGER NOT NULL REFERENCES order_item_sizes(id) ON DELETE RESTRICT, dispatched_size VARCHAR(10) NOT NULL, qty INTEGER NOT NULL CHECK(qty > 0), dispatch_date DATE NOT NULL, details TEXT NOT NULL DEFAULT '', invoice_number VARCHAR(150) NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
@@ -127,12 +127,15 @@ def init_db():
         if engine.dialect.name == "postgresql":
             conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled INTEGER NOT NULL DEFAULT 0"))
             conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_type VARCHAR(30) NOT NULL DEFAULT ''"))
+            conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_date DATE NULL"))
             conn.execute(text("ALTER TABLE order_item_sizes ADD COLUMN IF NOT EXISTS cancelled INTEGER NOT NULL DEFAULT 0"))
             conn.execute(text("ALTER TABLE order_dispatches ADD COLUMN IF NOT EXISTS invoice_number VARCHAR(150) NOT NULL DEFAULT ''"))
         else:
             cols = {r[1] for r in conn.execute(text("PRAGMA table_info(orders)")).fetchall()}
             if "gst_type" not in cols:
                 conn.execute(text("ALTER TABLE orders ADD COLUMN gst_type VARCHAR(30) NOT NULL DEFAULT ''"))
+            if "delivery_date" not in cols:
+                conn.execute(text("ALTER TABLE orders ADD COLUMN delivery_date DATE NULL"))
         # User accounts are created through first-run setup / Admin Panel.
         # Backfill SKU master from historic order items without changing saved order rates.
         conn.execute(text("""INSERT INTO sku_master(sku_number,sale_rate)
@@ -252,51 +255,83 @@ def df_download(df, filename, label="CSV Download"):
 
 def order_pdf_bytes(order, items_df):
     buff = io.BytesIO()
-    doc = SimpleDocTemplate(buff, pagesize=A4, rightMargin=10*mm, leftMargin=10*mm, topMargin=10*mm, bottomMargin=12*mm)
+    doc = SimpleDocTemplate(buff, pagesize=A4, rightMargin=10*mm, leftMargin=10*mm, topMargin=8*mm, bottomMargin=12*mm)
     styles = getSampleStyleSheet()
-    small = styles["BodyText"]
-    small.fontSize = 8
-    small.leading = 10
-    # Professional PDF header: Trishiv logo on the left, Shubhvastra logo on the right.
+    small = ParagraphStyle("OrderInfoSmall", parent=styles["BodyText"], fontName="Helvetica", fontSize=8, leading=10, textColor=colors.HexColor("#222222"))
+    title_style = ParagraphStyle("CompactOrderTitle", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=11, leading=13, alignment=TA_CENTER, spaceBefore=0, spaceAfter=5)
+    label_style = ParagraphStyle("OrderInfoLabel", parent=small, fontName="Helvetica-Bold")
+    # Requested header: centered title above both company logos.
+    story = [Paragraph("ORDER FORM", title_style), Spacer(1, 2*mm)]
     app_dir = BASE
     trishiv_logo = app_dir / "static" / "trishiv_logo.jpg"
     shubhvastra_logo = app_dir / "static" / "shubhvastra_logo.png"
-    logo_left = PDFImage(str(trishiv_logo), width=38*mm, height=30*mm, kind="proportional") if trishiv_logo.exists() else Paragraph("<b>TRISHIV ENTERPRISE LLP</b>", small)
-    logo_right = PDFImage(str(shubhvastra_logo), width=49*mm, height=24*mm, kind="proportional") if shubhvastra_logo.exists() else Paragraph("<b>SHUBHVASTRA</b>", small)
+    logo_left = PDFImage(str(trishiv_logo), width=47*mm, height=35*mm, kind="proportional") if trishiv_logo.exists() else Paragraph("<b>TRISHIV ENTERPRISE LLP</b>", small)
+    logo_right = PDFImage(str(shubhvastra_logo), width=49*mm, height=25*mm, kind="proportional") if shubhvastra_logo.exists() else Paragraph("<b>SHUBHVASTRA</b>", small)
     brand_row = Table([[logo_left, logo_right]], colWidths=[95*mm, 95*mm], hAlign="LEFT")
-    brand_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(0,0),(0,0),"LEFT"),("ALIGN",(1,0),(1,0),"RIGHT"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
-    title_style = ParagraphStyle("CompactOrderTitle", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=12, leading=14, alignment=TA_CENTER, spaceBefore=2, spaceAfter=5)
-    story = [brand_row, Spacer(1, 2*mm), Paragraph("ORDER FORM", title_style), Spacer(1, 2*mm)]
+    brand_row.setStyle(TableStyle([
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(0,0),(0,0),"LEFT"),("ALIGN",(1,0),(1,0),"RIGHT"),
+        ("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),
+        ("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
+    story.extend([brand_row, Spacer(1, 2*mm)])
     company_style = ParagraphStyle("CompanyContact", parent=small, fontSize=8, leading=10, textColor=colors.HexColor("#333333"), spaceAfter=1)
-    story.extend([Paragraph("<b>Address:</b> 2005 New Sardar Traders Market (NSTM), Puna Kumbhariya Road, Surat 395010", company_style), Paragraph("<b>Phone Number:</b> 9537510757 (Bhavik), 9099444455 (Nimesh)", company_style), Spacer(1, 3*mm)])
-    party_data = [
-        [Paragraph(f"<b>Party Name:</b> {order.get('party_name','')}", small), Paragraph(f"<b>Order Number:</b> {order.get('order_no','')}", small)],
-        [Paragraph(f"<b>Address:</b> {order.get('address','')}", small), Paragraph(f"<b>Order Date:</b> {str(order.get('order_date',''))[:10]}", small)],
-        [Paragraph(f"<b>City, State:</b> {order.get('city','')}, {order.get('state','')}", small), Paragraph(f"<b>GST:</b> {order.get('gst_type','') or '-'}", small)],
-        [Paragraph(f"<b>Phone:</b> {order.get('phone_number','')}", small), Paragraph(f"<b>Packaging:</b> {order.get('packaging','') or '-'}", small)],
-        [Paragraph(f"<b>Party GST Number:</b> {order.get('gst_number','')}", small), Paragraph(f"<b>Agent:</b> {order.get('agent_name','') or '-'}", small)],
-        [Paragraph(f"<b>Transport Name:</b> {order.get('transport_details','')}", small), Paragraph(f"<b>Transport ID:</b> {order.get('transport_gst_number','')}", small)],
+    story.extend([
+        Paragraph("<b>Address:</b> 2005 New Sardar Traders Market (NSTM), Puna Kumbhariya Road, Surat 395010", company_style),
+        Paragraph("<b>Phone Number:</b> 9537510757 (Bhavik), 9099444455 (Nimesh)", company_style),
+        Spacer(1, 3*mm)
+    ])
+    def cell(label, value):
+        val = str(value or "-").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return Paragraph(f"<b>{label}:</b> {val}", small)
+    party_left = [
+        cell("Party Name", order.get("party_name")),
+        cell("Address", order.get("address")),
+        cell("City", order.get("city")),
+        cell("State", order.get("state")),
+        cell("Phone Number", order.get("phone_number")),
+        cell("GST Number", order.get("gst_number")),
     ]
-    pt=Table(party_data,colWidths=[95*mm,95*mm])
-    pt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#aab7c7')),('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#f7f9fc')),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
-    story.extend([pt, Spacer(1, 5*mm), Paragraph("ITEM DETAILS", styles["Heading2"])])
+    order_right = [
+        cell("Order Number", order.get("order_no")),
+        cell("Order Date", str(order.get("order_date",""))[:10]),
+        cell("Delivery Date", str(order.get("delivery_date",""))[:10] if order.get("delivery_date") else "-"),
+    ]
+    first_data = [[party_left, order_right]]
+    first_table = Table(first_data, colWidths=[95*mm,95*mm], hAlign="LEFT")
+    first_table.setStyle(TableStyle([
+        ("GRID",(0,0),(-1,-1),0.4,colors.HexColor("#aab7c7")),
+        ("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#f7f9fc")),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),6),
+        ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
+    ]))
+    transport_left = [cell("Transport Name", order.get("transport_details")), cell("Transport ID", order.get("transport_gst_number"))]
+    gst_right = [cell("GST", order.get("gst_type")), cell("Packaging Details", order.get("packaging"))]
+    second_table = Table([[transport_left, gst_right]], colWidths=[95*mm,95*mm], hAlign="LEFT")
+    second_table.setStyle(TableStyle([
+        ("GRID",(0,0),(-1,-1),0.4,colors.HexColor("#aab7c7")),
+        ("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#f7f9fc")),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),6),
+        ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
+    ]))
+    story.extend([first_table, Spacer(1,2*mm), second_table, Spacer(1,5*mm), Paragraph("ITEM DETAILS", styles["Heading2"])])
     data=[["Sr.","Particulars / SKU","M","L","XL","XXL","Discount","WSP Rate","Qty","Amount"]]
-    total_qty=0; total_amount=0
-    grouped={}
-    for r in items_df.to_dict('records'):
-        sr=r.get('Sr',''); sku=r.get('Particulars',''); key=(sr,sku,r.get('Discount',''),r.get('WSP Rate',r.get('Piece Rate','')))
+    total_qty=0; total_amount=0; grouped={}
+    for r in items_df.to_dict("records"):
+        sr=r.get("Sr",""); sku=r.get("Particulars","")
+        key=(sr,sku,r.get("Discount",""),r.get("WSP Rate",r.get("Piece Rate","")))
         if key not in grouped: grouped[key]={"M":0,"L":0,"XL":0,"XXL":0}
-        size=str(r.get('Size','')).upper()
-        if size in grouped[key]: grouped[key][size]+=int(r.get('Qty',0) or 0)
+        size=str(r.get("Size","")).upper()
+        if size in grouped[key]: grouped[key][size]+=int(r.get("Qty",0) or 0)
     for (sr,sku,disc,rate),sizes in grouped.items():
         qty=sum(sizes.values()); amount=max(0,float(rate or 0)-float(disc or 0))*qty
         total_qty+=qty; total_amount+=amount
-        data.append([str(sr),str(sku),str(sizes['M']),str(sizes['L']),str(sizes['XL']),str(sizes['XXL']),str(disc),str(rate),str(qty),f"{amount:,.2f}"])
+        data.append([str(sr),str(sku),str(sizes["M"]),str(sizes["L"]),str(sizes["XL"]),str(sizes["XXL"]),str(disc),f"{float(rate or 0):,.2f}",str(qty),f"{amount:,.2f}"])
     data.append(["","TOTAL","","","","","","",str(total_qty),f"{total_amount:,.2f}"])
     tab=Table(data,repeatRows=1,colWidths=[9*mm,43*mm,11*mm,11*mm,12*mm,13*mm,17*mm,19*mm,13*mm,23*mm])
-    tab.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#132b4a')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7.5),('GRID',(0,0),(-1,-1),0.45,colors.HexColor('#9aa8b8')),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(2,1),(-1,-1),'RIGHT'),('BACKGROUND',(0,-1),(-1,-1),colors.HexColor('#eaf3fb')),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold'),('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
-    story.extend([tab, Spacer(1, 4*mm)])
-    if order.get('narration'): story.append(Paragraph(f"<b>Additional Order Details:</b> {order['narration']}",small))
+    tab.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#132b4a")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),7.5),("GRID",(0,0),(-1,-1),0.45,colors.HexColor("#9aa8b8")),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(2,1),(-1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#eaf3fb")),("FONTNAME",(0,-1),(-1,-1),"Helvetica-Bold"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+    story.extend([tab, Spacer(1,4*mm)])
+    if order.get("narration"): story.append(Paragraph(f"<b>Additional Order Details:</b> {str(order['narration'])}",small))
     doc.build(story)
     return buff.getvalue()
 
@@ -608,6 +643,8 @@ def page_order_form(edit_id=None):
     gst_options=["5% GST","5-18% GST"]
     old_gst=str(existing.get("gst_type") or "") if existing else ""
     gst=st.radio("GST *",gst_options,index=gst_options.index(old_gst) if old_gst in gst_options else None,horizontal=True,key=f"ord_gst_{edit_id or 'new'}",disabled=bool(edit_id),label_visibility="collapsed")
+    delivery_default=str(existing.get("delivery_date") or date.today().isoformat())[:10] if existing else date.today().isoformat()
+    delivery_date=st.date_input("Delivery Date *", value=date.fromisoformat(delivery_default), key=f"ord_delivery_date_{edit_id or 'new'}", disabled=bool(edit_id))
     narration=st.text_area("Additional Order Details",value=str(existing["narration"] or "") if existing else "",key=f"ord_narration_{edit_id or 'new'}",disabled=bool(edit_id))
     buttons=st.columns(3)
     save=buttons[0].button("Save Order" if not edit_id else "Save Item Changes",type="primary",use_container_width=True)
@@ -636,13 +673,13 @@ def page_order_form(edit_id=None):
             if not cleaned: raise ValueError("ઓછામાં ઓછો એક item ઉમેરો.")
             with engine.begin() as conn:
                 if edit_id:
-                    conn.execute(text("UPDATE orders SET order_date=:d,party_id=:p,packaging=:pack,gst_type=:gst,narration=:n WHERE id=:id"),{"d":od,"p":int(party_id),"pack":json.dumps(packaging),"gst":gst,"n":narration.strip(),"id":int(edit_id)})
+                    conn.execute(text("UPDATE orders SET order_date=:d,delivery_date=:dd,party_id=:p,packaging=:pack,gst_type=:gst,narration=:n WHERE id=:id"),{"d":od,"dd":delivery_date,"p":int(party_id),"pack":json.dumps(packaging),"gst":gst,"n":narration.strip(),"id":int(edit_id)})
                     conn.execute(text("DELETE FROM order_items WHERE order_id=:id"),{"id":int(edit_id)}); oid=int(edit_id)
                     order_no=int(existing["order_no"])
                 else:
                     if engine.dialect.name == "postgresql": conn.execute(text("LOCK TABLE orders IN EXCLUSIVE MODE"))
                     order_no=int(conn.execute(text("SELECT COALESCE(MAX(order_no),1100)+1 FROM orders")).scalar_one())
-                    oid=conn.execute(text("INSERT INTO orders(order_no,order_date,party_id,packaging,gst_type,narration) VALUES(:no,:d,:p,:pack,:gst,:n) RETURNING id"),{"no":order_no,"d":od,"p":int(party_id),"pack":json.dumps(packaging),"gst":gst,"n":narration.strip()}).scalar_one()
+                    oid=conn.execute(text("INSERT INTO orders(order_no,order_date,delivery_date,party_id,packaging,gst_type,narration) VALUES(:no,:d,:dd,:p,:pack,:gst,:n) RETURNING id"),{"no":order_no,"d":od,"dd":delivery_date,"p":int(party_id),"pack":json.dumps(packaging),"gst":gst,"n":narration.strip()}).scalar_one()
                 for ix,r in enumerate(cleaned,1):
                     iid=conn.execute(text("INSERT INTO order_items(order_id,sr_no,particulars,piece_rate,discount) VALUES(:o,:sr,:sku,:rate,:disc) RETURNING id"),{"o":oid,"sr":ix,"sku":r["sku"],"rate":r["rate"],"disc":r["discount"]}).scalar_one()
                     for size,qty in r["sizes"].items():
