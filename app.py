@@ -57,6 +57,16 @@ div.stButton>button[kind="primary"] *, [data-testid="stFormSubmitButton"] button
 [data-testid="stDataFrame"] *{color:#1d2a3b}
 hr{border-color:#dbe4ef!important}
 @media(max-width:800px){.block-container{padding-left:.7rem;padding-right:.7rem}.brandtitle{font-size:1.05rem}}
+
+/* Mobile-first order-entry cards */
+@media (max-width: 768px){
+  .block-container{padding-left:.65rem!important;padding-right:.65rem!important;padding-top:.6rem!important}
+  h1{font-size:1.45rem!important} h2{font-size:1.2rem!important} h3{font-size:1.05rem!important}
+  [data-testid="stVerticalBlockBorderWrapper"]{border-radius:10px!important}
+  [data-testid="stTextInput"] input,[data-testid="stNumberInput"] input,[data-testid="stDateInput"] input{font-size:16px!important;min-height:42px!important}
+  [data-testid="stSelectbox"] [role="combobox"]{min-height:42px!important}
+  [data-testid="stButton"] button,[data-testid="stDownloadButton"] button{min-height:42px!important;white-space:normal!important}
+}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -585,46 +595,50 @@ def page_order_form(edit_id=None):
         info[2].text_input("State",str(party.state),disabled=True,key=f"ord_state_{edit_id or 'new'}")
         info[3].text_input("Agent",str(party.agent_name),disabled=True,key=f"ord_agent_{edit_id or 'new'}")
     st.subheader("Item Details")
+    st.caption("દરેક item અલગ card માં છે જેથી mobile પર SKU, size, discount અને rate સરળતાથી ભરી શકાય.")
     sku_options=[""]+skus.sku_number.tolist()
     rows=[]
-    header=st.columns([.5,3,1,1,1,1,1.2,1.3,1.2])
-    for col,label in zip(header,["Sr.","Particulars / SKU","M","L","XL","XXL","Discount","WSP Rate","Qty"]): col.markdown(f"**{label}**")
     last_filled=False
     for ix in range(row_count):
         old=old_items.iloc[ix] if edit_id and ix<len(old_items) else None
-        c=st.columns([.5,3,1,1,1,1,1.2,1.3,1.2])
-        c[0].write(str(ix+1))
-        skey=f"ord_sku_{ix}"
-        if skey not in st.session_state: st.session_state[skey]=str(old.particulars) if old is not None else ""
-        cur=st.session_state[skey]
-        opts=sku_options.copy()
-        if cur and cur not in opts: opts.insert(1,cur)
-        sku=c[1].selectbox("Particulars / SKU",opts,index=opts.index(cur) if cur in opts else 0,key=skey,label_visibility="collapsed")
-        # Always derive a new-order row's rate from the currently selected SKU.
-        # For edits, retain the rate already saved on that order.
-        sku_rate = float(skus.loc[skus.sku_number==sku,"sale_rate"].iloc[0]) if not skus.empty and sku in skus.sku_number.tolist() else 0.0
-        rate_default=float(old.piece_rate) if old is not None else sku_rate
-        rkey=f"ord_rate_{ix}"
-        if edit_id:
-            if rkey not in st.session_state: st.session_state[rkey]=rate_default
-        else:
-            st.session_state[rkey]=sku_rate
-        st.session_state[f"ord_last_sku_{ix}"]=sku
-        sizes={}
-        for j,size in enumerate(SIZES):
-            qkey=f"ord_qty_{ix}_{size}"
-            if qkey not in st.session_state: st.session_state[qkey]=0
-            sizes[size]=c[2+j].number_input(size,min_value=0,step=1,key=qkey,label_visibility="collapsed")
-        disc_key=f"ord_disc_{ix}"
-        if disc_key not in st.session_state: st.session_state[disc_key]=float(old.discount) if old is not None else 0.0
-        disc=c[6].number_input("Discount",min_value=0.0,step=1.0,format="%.2f",key=disc_key,label_visibility="collapsed",disabled=bool(edit_id))
-        # Rate is fetched from SKU Master and displayed read-only without +/- controls.
-        rate=float(st.session_state.get(rkey, rate_default) or 0)
-        c[7].text_input("WSP Rate", value=f"{rate:,.2f}", key=f"ord_rate_display_{ix}_{edit_id or 'new'}", label_visibility="collapsed", disabled=True)
-        qty=sum(sizes.values())
-        c[8].markdown(f"**{qty}**")
+        with st.container(border=True):
+            st.markdown(f"**Item {ix+1}**")
+            skey=f"ord_sku_{ix}"
+            if skey not in st.session_state: st.session_state[skey]=str(old.particulars) if old is not None else ""
+            cur=st.session_state[skey]
+            opts=sku_options.copy()
+            if cur and cur not in opts: opts.insert(1,cur)
+            sku=st.selectbox("Particulars / SKU",opts,index=opts.index(cur) if cur in opts else 0,key=skey,placeholder="Select SKU")
+            # For new orders, always read the rate directly from SKU Master.
+            sku_rate=float(skus.loc[skus.sku_number==sku,"sale_rate"].iloc[0]) if not skus.empty and sku in skus.sku_number.tolist() else 0.0
+            rate_default=float(old.piece_rate) if old is not None else sku_rate
+            rkey=f"ord_rate_{ix}"
+            if edit_id:
+                if rkey not in st.session_state: st.session_state[rkey]=rate_default
+                rate=float(st.session_state.get(rkey, rate_default) or 0)
+            else:
+                rate=sku_rate
+                st.session_state[rkey]=sku_rate
+            st.session_state[f"ord_last_sku_{ix}"]=sku
+            st.markdown("**Size-wise Quantity**")
+            size_cols=st.columns(4)
+            sizes={}
+            for j,size in enumerate(SIZES):
+                qkey=f"ord_qty_{ix}_{size}"
+                if qkey not in st.session_state: st.session_state[qkey]=0
+                sizes[size]=size_cols[j].number_input(size,min_value=0,step=1,key=qkey)
+            disc_key=f"ord_disc_{ix}"
+            if disc_key not in st.session_state: st.session_state[disc_key]=float(old.discount) if old is not None else 0.0
+            detail_cols=st.columns([1,1,1])
+            disc=detail_cols[0].number_input("Discount",min_value=0.0,step=1.0,format="%.2f",key=disc_key,disabled=bool(edit_id))
+            # SKU-specific key forces the read-only display to refresh when SKU changes.
+            rate_key=f"ord_rate_display_{ix}_{edit_id or 'new'}_{hashlib.sha1(str(sku).encode()).hexdigest()[:8]}"
+            detail_cols[1].text_input("WSP Rate (₹)",value=f"₹ {rate:,.2f}",key=rate_key,disabled=True)
+            qty=sum(sizes.values())
+            detail_cols[2].text_input("Total Qty",value=str(qty),key=f"ord_qty_total_{ix}_{edit_id or 'new'}",disabled=True)
         rows.append({"sku":sku,"rate":rate,"discount":disc,"sizes":sizes})
         if ix==row_count-1 and (sku or qty>0): last_filled=True
+
     if last_filled and row_count<999:
         st.session_state["new_order_row_count"]=row_count+1
         st.rerun()
@@ -690,19 +704,26 @@ def page_order_form(edit_id=None):
         except Exception as e: st.error(f"Order save ન થયો: {e}")
     if st.session_state.get("show_pdf_prompt") and st.session_state.get("last_saved_order_id"):
         st.info("શું આ Order ની PDF download કરવી છે?")
-        y,n=st.columns(2)
-        if y.button("Yes — Download PDF",type="primary"):
-            oid=int(st.session_state["last_saved_order_id"])
-            odf=q("SELECT o.*,p.party_name,p.phone_number,p.address,p.city,p.state,p.gst_number,p.transport_details,p.transport_gst_number,COALESCE(a.agent_name,'') agent_name FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id WHERE o.id=:id",{"id":oid}).iloc[0].to_dict()
-            try: odf["packaging"]=", ".join(json.loads(odf.get("packaging") or "[]"))
-            except Exception: pass
-            it=q("SELECT i.sr_no AS Sr,i.particulars AS Particulars,i.piece_rate AS \"WSP Rate\",i.discount AS Discount,s.size_code AS Size,s.ordered_qty AS Qty,(SELECT COALESCE(SUM(d.qty),0) FROM order_dispatches d WHERE d.order_size_id=s.id) AS Dispatched FROM order_items i JOIN order_item_sizes s ON s.order_item_id=i.id WHERE i.order_id=:id ORDER BY i.sr_no,s.size_code",{"id":oid})
-            st.download_button("Download Order PDF",order_pdf_bytes(odf,it),file_name=f"shubhvastra_order_{odf['order_no']}.pdf",mime="application/pdf",type="primary")
-            st.caption("PDF download button દબાવીને file save કરો. પછી No / Continue દબાવો.")
-        if n.button("No — Continue to New Order"):
+        oid=int(st.session_state["last_saved_order_id"])
+        odf=q("SELECT o.*,p.party_name,p.phone_number,p.address,p.city,p.state,p.gst_number,p.transport_details,p.transport_gst_number,COALESCE(a.agent_name,'') agent_name FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id WHERE o.id=:id",{"id":oid}).iloc[0].to_dict()
+        try: odf["packaging"]=", ".join(json.loads(odf.get("packaging") or "[]"))
+        except Exception: pass
+        it=q('SELECT i.sr_no AS Sr,i.particulars AS Particulars,i.piece_rate AS "WSP Rate",i.discount AS Discount,s.size_code AS Size,s.ordered_qty AS Qty,(SELECT COALESCE(SUM(d.qty),0) FROM order_dispatches d WHERE d.order_size_id=s.id) AS Dispatched FROM order_items i JOIN order_item_sizes s ON s.order_item_id=i.id WHERE i.order_id=:id ORDER BY i.sr_no,s.size_code',{"id":oid})
+        pdf_data=order_pdf_bytes(odf,it)
+        def finish_after_pdf_download():
             for k in list(st.session_state.keys()):
-                if k.startswith(("ord_sku_","ord_rate_","ord_disc_","ord_qty_","ord_last_sku_","ord_pack_","ord_gst_","ord_narration_","ord_party_","ord_date_")): st.session_state.pop(k,None)
-            st.session_state["new_order_row_count"]=5; st.session_state.pop("show_pdf_prompt",None); st.session_state.pop("last_saved_order_id",None); st.session_state.pop("edit_order_id",None); st.session_state["pending_page"]="New Order"; st.rerun()
+                if k.startswith(("ord_sku_","ord_rate_","ord_disc_","ord_qty_","ord_last_sku_","ord_pack_","ord_gst_","ord_narration_","ord_party_","ord_date_","ord_delivery_date_")):
+                    st.session_state.pop(k,None)
+            st.session_state["new_order_row_count"]=5
+            st.session_state.pop("show_pdf_prompt",None)
+            st.session_state.pop("last_saved_order_id",None)
+            st.session_state.pop("edit_order_id",None)
+            st.session_state.pop("confirm_clean_order_form",None)
+            st.session_state["pending_page"]="New Order"
+        st.download_button("Yes — Download PDF & Open New Order",pdf_data,file_name=f"shubhvastra_order_{odf['order_no']}.pdf",mime="application/pdf",type="primary",on_click=finish_after_pdf_download,use_container_width=True)
+        if st.button("No — Continue Without PDF",use_container_width=True):
+            finish_after_pdf_download()
+            st.rerun()
 
 
 def page_orders():
