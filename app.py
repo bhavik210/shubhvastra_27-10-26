@@ -58,15 +58,6 @@ div.stButton>button[kind="primary"] *, [data-testid="stFormSubmitButton"] button
 hr{border-color:#dbe4ef!important}
 @media(max-width:800px){.block-container{padding-left:.7rem;padding-right:.7rem}.brandtitle{font-size:1.05rem}}
 
-/* Mobile-first order-entry cards */
-@media (max-width: 768px){
-  .block-container{padding-left:.65rem!important;padding-right:.65rem!important;padding-top:.6rem!important}
-  h1{font-size:1.45rem!important} h2{font-size:1.2rem!important} h3{font-size:1.05rem!important}
-  [data-testid="stVerticalBlockBorderWrapper"]{border-radius:10px!important}
-  [data-testid="stTextInput"] input,[data-testid="stNumberInput"] input,[data-testid="stDateInput"] input{font-size:16px!important;min-height:42px!important}
-  [data-testid="stSelectbox"] [role="combobox"]{min-height:42px!important}
-  [data-testid="stButton"] button,[data-testid="stDownloadButton"] button{min-height:42px!important;white-space:normal!important}
-}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -595,47 +586,43 @@ def page_order_form(edit_id=None):
         info[2].text_input("State",str(party.state),disabled=True,key=f"ord_state_{edit_id or 'new'}")
         info[3].text_input("Agent",str(party.agent_name),disabled=True,key=f"ord_agent_{edit_id or 'new'}")
     st.subheader("Item Details")
-    st.caption("દરેક item અલગ card માં છે જેથી mobile પર SKU, size, discount અને rate સરળતાથી ભરી શકાય.")
+    st.caption("શરૂઆતમાં 5 rows દેખાશે. છેલ્લી row માં SKU અથવા quantity ભરશો એટલે આગળની row આપમેળે ઉમેરાશે (મહત્તમ 999).")
     sku_options=[""]+skus.sku_number.tolist()
     rows=[]
+    header=st.columns([.5,3,1,1,1,1,1.2,1.3,1.2])
+    for col,label in zip(header,["Sr.","Particulars / SKU","M","L","XL","XXL","Discount","WSP Rate (₹)","Qty"]): col.markdown(f"**{label}**")
     last_filled=False
     for ix in range(row_count):
         old=old_items.iloc[ix] if edit_id and ix<len(old_items) else None
-        with st.container(border=True):
-            st.markdown(f"**Item {ix+1}**")
-            skey=f"ord_sku_{ix}"
-            if skey not in st.session_state: st.session_state[skey]=str(old.particulars) if old is not None else ""
-            cur=st.session_state[skey]
-            opts=sku_options.copy()
-            if cur and cur not in opts: opts.insert(1,cur)
-            sku=st.selectbox("Particulars / SKU",opts,index=opts.index(cur) if cur in opts else 0,key=skey,placeholder="Select SKU")
-            # For new orders, always read the rate directly from SKU Master.
-            sku_rate=float(skus.loc[skus.sku_number==sku,"sale_rate"].iloc[0]) if not skus.empty and sku in skus.sku_number.tolist() else 0.0
-            rate_default=float(old.piece_rate) if old is not None else sku_rate
-            rkey=f"ord_rate_{ix}"
-            if edit_id:
-                if rkey not in st.session_state: st.session_state[rkey]=rate_default
-                rate=float(st.session_state.get(rkey, rate_default) or 0)
-            else:
-                rate=sku_rate
-                st.session_state[rkey]=sku_rate
-            st.session_state[f"ord_last_sku_{ix}"]=sku
-            st.markdown("**Size-wise Quantity**")
-            size_cols=st.columns(4)
-            sizes={}
-            for j,size in enumerate(SIZES):
-                qkey=f"ord_qty_{ix}_{size}"
-                if qkey not in st.session_state: st.session_state[qkey]=0
-                sizes[size]=size_cols[j].number_input(size,min_value=0,step=1,key=qkey)
-            disc_key=f"ord_disc_{ix}"
-            if disc_key not in st.session_state: st.session_state[disc_key]=float(old.discount) if old is not None else 0.0
-            detail_cols=st.columns([1,1,1])
-            disc=detail_cols[0].number_input("Discount",min_value=0.0,step=1.0,format="%.2f",key=disc_key,disabled=bool(edit_id))
-            # SKU-specific key forces the read-only display to refresh when SKU changes.
-            rate_key=f"ord_rate_display_{ix}_{edit_id or 'new'}_{hashlib.sha1(str(sku).encode()).hexdigest()[:8]}"
-            detail_cols[1].text_input("WSP Rate (₹)",value=f"₹ {rate:,.2f}",key=rate_key,disabled=True)
-            qty=sum(sizes.values())
-            detail_cols[2].text_input("Total Qty",value=str(qty),key=f"ord_qty_total_{ix}_{edit_id or 'new'}",disabled=True)
+        c=st.columns([.5,3,1,1,1,1,1.2,1.3,1.2])
+        c[0].write(str(ix+1))
+        skey=f"ord_sku_{ix}"
+        if skey not in st.session_state: st.session_state[skey]=str(old.particulars) if old is not None else ""
+        cur=st.session_state[skey]
+        opts=sku_options.copy()
+        if cur and cur not in opts: opts.insert(1,cur)
+        sku=c[1].selectbox("Particulars / SKU",opts,index=opts.index(cur) if cur in opts else 0,key=skey,label_visibility="collapsed")
+        sku_rate=float(skus.loc[skus.sku_number==sku,"sale_rate"].iloc[0]) if not skus.empty and sku in skus.sku_number.tolist() else 0.0
+        rate_default=float(old.piece_rate) if old is not None else sku_rate
+        rkey=f"ord_rate_{ix}"
+        if edit_id:
+            if rkey not in st.session_state: st.session_state[rkey]=rate_default
+            rate=float(st.session_state.get(rkey,rate_default) or 0)
+        else:
+            rate=sku_rate
+            st.session_state[rkey]=sku_rate
+        st.session_state[f"ord_last_sku_{ix}"]=sku
+        sizes={}
+        for j,size in enumerate(SIZES):
+            qkey=f"ord_qty_{ix}_{size}"
+            if qkey not in st.session_state: st.session_state[qkey]=0
+            sizes[size]=c[2+j].number_input(size,min_value=0,step=1,key=qkey,label_visibility="collapsed")
+        disc_key=f"ord_disc_{ix}"
+        if disc_key not in st.session_state: st.session_state[disc_key]=float(old.discount) if old is not None else 0.0
+        disc=c[6].number_input("Discount",min_value=0.0,step=1.0,format="%.2f",key=disc_key,label_visibility="collapsed",disabled=bool(edit_id))
+        c[7].number_input("WSP Rate (₹)",min_value=0.0,value=float(rate),step=1.0,format="%.2f",key=f"ord_rate_visible_{ix}_{edit_id or 'new'}",disabled=True,label_visibility="collapsed")
+        qty=sum(sizes.values())
+        c[8].markdown(f"**{qty}**")
         rows.append({"sku":sku,"rate":rate,"discount":disc,"sizes":sizes})
         if ix==row_count-1 and (sku or qty>0): last_filled=True
 
