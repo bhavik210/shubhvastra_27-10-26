@@ -113,21 +113,25 @@ def init_db():
     stmts = [
       f"CREATE TABLE IF NOT EXISTS agents (id {identity}, agent_name VARCHAR(200) NOT NULL UNIQUE, phone_number VARCHAR(100) NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
       f"CREATE TABLE IF NOT EXISTS parties (id {identity}, party_name VARCHAR(250) NOT NULL, phone_number VARCHAR(100) NOT NULL, address TEXT NOT NULL DEFAULT '', city VARCHAR(150) NOT NULL DEFAULT '', state VARCHAR(150) NOT NULL DEFAULT '', gst_number VARCHAR(100) NOT NULL DEFAULT '', reference VARCHAR(30) NOT NULL DEFAULT 'DIRECT', transport_details TEXT NOT NULL DEFAULT '', transport_gst_number VARCHAR(100) NOT NULL DEFAULT '', agent_id INTEGER NULL REFERENCES agents(id) ON DELETE RESTRICT, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-      f"CREATE TABLE IF NOT EXISTS orders (id {identity}, order_no INTEGER NOT NULL UNIQUE, order_date DATE NOT NULL, party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE RESTRICT, packaging TEXT NOT NULL DEFAULT '[]', narration TEXT NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, cancelled INTEGER NOT NULL DEFAULT 0)",
+      f"CREATE TABLE IF NOT EXISTS orders (id {identity}, order_no INTEGER NOT NULL UNIQUE, order_date DATE NOT NULL, party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE RESTRICT, packaging TEXT NOT NULL DEFAULT '[]', gst_type VARCHAR(30) NOT NULL DEFAULT '', narration TEXT NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, cancelled INTEGER NOT NULL DEFAULT 0)",
       f"CREATE TABLE IF NOT EXISTS order_items (id {identity}, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE, sr_no INTEGER NOT NULL, particulars VARCHAR(250) NOT NULL, piece_rate NUMERIC(12,2) NOT NULL DEFAULT 0, discount NUMERIC(12,2) NOT NULL DEFAULT 0)",
       f"CREATE TABLE IF NOT EXISTS order_item_sizes (id {identity}, order_item_id INTEGER NOT NULL REFERENCES order_items(id) ON DELETE CASCADE, size_code VARCHAR(10) NOT NULL, ordered_qty INTEGER NOT NULL CHECK(ordered_qty > 0), cancelled INTEGER NOT NULL DEFAULT 0, UNIQUE(order_item_id,size_code))",
       f"CREATE TABLE IF NOT EXISTS order_dispatches (id {identity}, order_size_id INTEGER NOT NULL REFERENCES order_item_sizes(id) ON DELETE RESTRICT, dispatched_size VARCHAR(10) NOT NULL, qty INTEGER NOT NULL CHECK(qty > 0), dispatch_date DATE NOT NULL, details TEXT NOT NULL DEFAULT '', invoice_number VARCHAR(150) NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
       f"CREATE TABLE IF NOT EXISTS sku_master (id {identity}, sku_number VARCHAR(250) NOT NULL UNIQUE, sale_rate NUMERIC(12,2) NOT NULL CHECK(sale_rate >= 0), created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-      f"CREATE TABLE IF NOT EXISTS users (id {identity}, username VARCHAR(100) NOT NULL UNIQUE, password_hash TEXT NOT NULL, role VARCHAR(20) NOT NULL DEFAULT 'staff', active INTEGER NOT NULL DEFAULT 1, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-      f"CREATE TABLE IF NOT EXISTS activity_log (id {identity}, username VARCHAR(100) NOT NULL, role VARCHAR(20) NOT NULL, action VARCHAR(100) NOT NULL, details TEXT NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+      f"CREATE TABLE IF NOT EXISTS users (id {identity}, username VARCHAR(100) NOT NULL UNIQUE, password_hash TEXT NOT NULL, role VARCHAR(20) NOT NULL DEFAULT 'staff', active INTEGER NOT NULL DEFAULT 1, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     ]
     with engine.begin() as conn:
         for stmt in stmts: conn.execute(text(stmt))
         # Add columns if upgrading a prior PostgreSQL schema.
         if engine.dialect.name == "postgresql":
             conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled INTEGER NOT NULL DEFAULT 0"))
+            conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_type VARCHAR(30) NOT NULL DEFAULT ''"))
             conn.execute(text("ALTER TABLE order_item_sizes ADD COLUMN IF NOT EXISTS cancelled INTEGER NOT NULL DEFAULT 0"))
             conn.execute(text("ALTER TABLE order_dispatches ADD COLUMN IF NOT EXISTS invoice_number VARCHAR(150) NOT NULL DEFAULT ''"))
+        else:
+            cols = {r[1] for r in conn.execute(text("PRAGMA table_info(orders)")).fetchall()}
+            if "gst_type" not in cols:
+                conn.execute(text("ALTER TABLE orders ADD COLUMN gst_type VARCHAR(30) NOT NULL DEFAULT ''"))
         # User accounts are created through first-run setup / Admin Panel.
         # Backfill SKU master from historic order items without changing saved order rates.
         conn.execute(text("""INSERT INTO sku_master(sku_number,sale_rate)
@@ -247,20 +251,40 @@ def df_download(df, filename, label="CSV Download"):
 
 def order_pdf_bytes(order, items_df):
     buff = io.BytesIO()
-    doc = SimpleDocTemplate(buff, pagesize=A4, rightMargin=12*mm, leftMargin=12*mm, topMargin=12*mm, bottomMargin=12*mm)
+    doc = SimpleDocTemplate(buff, pagesize=A4, rightMargin=10*mm, leftMargin=10*mm, topMargin=10*mm, bottomMargin=12*mm)
     styles = getSampleStyleSheet()
-    story = [Paragraph("SHUBHVASTRA", styles["Title"]), Paragraph(f"Order No: {order['order_no']} &nbsp;&nbsp; Date: {str(order['order_date'])[:10]}", styles["Heading2"]), Spacer(1, 5*mm)]
-    story.append(Paragraph(f"Party: {order['party_name']} | Phone: {order['phone_number']}", styles["Normal"]))
-    story.append(Paragraph(f"Address: {order['address']}, {order['city']}, {order['state']}", styles["Normal"]))
-    story.append(Paragraph(f"Agent: {order.get('agent_name') or '-'} | Reference: {order.get('reference') or '-'}", styles["Normal"]))
-    story.append(Spacer(1, 5*mm))
-    data=[["Sr","Particulars","Rate","Discount","Size","Qty","Dispatched","Pending"]]
+    small = styles["BodyText"]
+    small.fontSize = 8
+    small.leading = 10
+    story = [Paragraph("SHUBHVASTRA — ORDER FORM", styles["Title"]), Spacer(1, 3*mm)]
+    party_data = [
+        [Paragraph(f"<b>Party Name:</b> {order.get('party_name','')}", small), Paragraph(f"<b>Order Number:</b> {order.get('order_no','')}", small)],
+        [Paragraph(f"<b>Address:</b> {order.get('address','')}", small), Paragraph(f"<b>Order Date:</b> {str(order.get('order_date',''))[:10]}", small)],
+        [Paragraph(f"<b>City, State:</b> {order.get('city','')}, {order.get('state','')}", small), Paragraph(f"<b>GST:</b> {order.get('gst_type','') or '-'}", small)],
+        [Paragraph(f"<b>Phone:</b> {order.get('phone_number','')}", small), Paragraph(f"<b>Packaging:</b> {order.get('packaging','') or '-'}", small)],
+        [Paragraph(f"<b>Party GST Number:</b> {order.get('gst_number','')}", small), Paragraph(f"<b>Agent:</b> {order.get('agent_name','') or '-'}", small)],
+        [Paragraph(f"<b>Transport Name:</b> {order.get('transport_details','')}", small), Paragraph(f"<b>Transport ID:</b> {order.get('transport_gst_number','')}", small)],
+    ]
+    pt=Table(party_data,colWidths=[95*mm,95*mm])
+    pt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#aab7c7')),('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#f7f9fc')),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
+    story.extend([pt, Spacer(1, 5*mm), Paragraph("ITEM DETAILS", styles["Heading2"])])
+    data=[["Sr.","Particulars / SKU","M","L","XL","XXL","Discount","WSP Rate","Qty","Amount"]]
+    total_qty=0; total_amount=0
+    grouped={}
     for r in items_df.to_dict('records'):
-        data.append([str(r.get('Sr','')),str(r.get('Particulars','')),str(r.get('Piece Rate','')),str(r.get('Discount','')),str(r.get('Size','')),str(r.get('Qty','')),str(r.get('Dispatched','')),str(max(0,int(r.get('Qty',0))-int(r.get('Dispatched',0))))])
-    tab=Table(data,repeatRows=1,colWidths=[10*mm,48*mm,20*mm,20*mm,16*mm,15*mm,22*mm,18*mm])
-    tab.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#132b4a')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),8),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#9aa8b8')),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#f3f6fa')]),('LEFTPADDING',(0,0),(-1,-1),4),('RIGHTPADDING',(0,0),(-1,-1),4)]))
-    story.append(tab)
-    if order.get('narration'): story.extend([Spacer(1,5*mm),Paragraph(f"Additional Order Details: {order['narration']}",styles['Normal'])])
+        sr=r.get('Sr',''); sku=r.get('Particulars',''); key=(sr,sku,r.get('Discount',''),r.get('WSP Rate',r.get('Piece Rate','')))
+        if key not in grouped: grouped[key]={"M":0,"L":0,"XL":0,"XXL":0}
+        size=str(r.get('Size','')).upper()
+        if size in grouped[key]: grouped[key][size]+=int(r.get('Qty',0) or 0)
+    for (sr,sku,disc,rate),sizes in grouped.items():
+        qty=sum(sizes.values()); amount=max(0,float(rate or 0)-float(disc or 0))*qty
+        total_qty+=qty; total_amount+=amount
+        data.append([str(sr),str(sku),str(sizes['M']),str(sizes['L']),str(sizes['XL']),str(sizes['XXL']),str(disc),str(rate),str(qty),f"{amount:,.2f}"])
+    data.append(["","TOTAL","","","","","","",str(total_qty),f"{total_amount:,.2f}"])
+    tab=Table(data,repeatRows=1,colWidths=[9*mm,43*mm,11*mm,11*mm,12*mm,13*mm,17*mm,19*mm,13*mm,23*mm])
+    tab.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#132b4a')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7.5),('GRID',(0,0),(-1,-1),0.45,colors.HexColor('#9aa8b8')),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(2,1),(-1,-1),'RIGHT'),('BACKGROUND',(0,-1),(-1,-1),colors.HexColor('#eaf3fb')),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold'),('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
+    story.extend([tab, Spacer(1, 4*mm)])
+    if order.get('narration'): story.append(Paragraph(f"<b>Additional Order Details:</b> {order['narration']}",small))
     doc.build(story)
     return buff.getvalue()
 
@@ -320,17 +344,27 @@ def page_dashboard():
         val=one(sql)["n"]
         with col: st.markdown(f"<div class='metric-card'><div class='metric-label'>{label}</div><div class='metric-value'>{val}</div></div>",unsafe_allow_html=True)
     st.subheader("All Parties")
-    is_staff = current_user().get("role") == "staff"
-    st.caption("Staff access: મર્યાદિત party વિગતો. અન્ય roles માટે સંપૂર્ણ party list.")
+    st.caption("Party list read-only છે. કોઈ field edit નહીં થાય; cell પસંદ કરીને Ctrl+C થી text copy કરી શકો છો.")
     search = st.text_input(
         "🔎 Search Party",
         placeholder="Party name, phone, city, GST, agent, transport અથવા reference લખો...",
         key="dashboard_party_search",
     )
-    if is_staff:
-        party_df = q("""SELECT p.party_name AS "Party Name", p.city AS "City", p.transport_details AS "Transport Name", p.transport_gst_number AS "Transport ID", p.address AS "Address" FROM parties p ORDER BY p.party_name COLLATE NOCASE""")
-    else:
-        party_df = q("""SELECT p.party_name AS "Party Name", p.phone_number AS "Phone Number", p.city AS "City", p.gst_number AS "GST Number", COALESCE(a.agent_name, '') AS "Agent Name", p.transport_details AS "Transport Name", p.transport_gst_number AS "Transport ID", p.reference AS "Reference", p.address AS "Address" FROM parties p LEFT JOIN agents a ON a.id=p.agent_id ORDER BY p.party_name COLLATE NOCASE""")
+    party_df = q("""
+        SELECT
+            p.party_name AS "Party Name",
+            p.phone_number AS "Phone Number",
+            p.city AS "City",
+            p.gst_number AS "GST Number",
+            COALESCE(a.agent_name, '') AS "Agent Name",
+            p.transport_details AS "Transport Name",
+            p.transport_gst_number AS "Transport ID",
+            p.reference AS "Reference",
+            p.address AS "Address"
+        FROM parties p
+        LEFT JOIN agents a ON a.id = p.agent_id
+        ORDER BY p.party_name COLLATE NOCASE
+    """)
     if search.strip() and not party_df.empty:
         needle = search.strip().casefold()
         mask = party_df.fillna("").astype(str).apply(
@@ -338,22 +372,31 @@ def page_dashboard():
         ).any(axis=1)
         party_df = party_df.loc[mask].reset_index(drop=True)
     st.caption(f"કુલ {len(party_df)} પાર્ટી મળ્યા.")
+    if str(current_user().get("role", "staff")).lower() == "staff":
+        party_df = party_df[[c for c in ["Party Name", "City", "Transport Name", "Transport ID", "Address"] if c in party_df.columns]]
     st.dataframe(
         party_df.fillna(""),
         use_container_width=True,
         hide_index=True,
         height=560,
         key="dashboard_all_parties_readonly",
-        column_config={name: st.column_config.TextColumn(name, width=("large" if name in ["Party Name", "Address"] else "medium")) for name in party_df.columns},
+        column_config={
+            "Party Name": st.column_config.TextColumn("Party Name", width="large"),
+            "Phone Number": st.column_config.TextColumn("Phone Number", width="medium"),
+            "City": st.column_config.TextColumn("City", width="medium"),
+            "GST Number": st.column_config.TextColumn("GST Number", width="medium"),
+            "Agent Name": st.column_config.TextColumn("Agent Name", width="medium"),
+            "Transport Name": st.column_config.TextColumn("Transport Name", width="medium"),
+            "Transport ID": st.column_config.TextColumn("Transport ID", width="medium"),
+            "Reference": st.column_config.TextColumn("Reference", width="small"),
+            "Address": st.column_config.TextColumn("Address", width="large"),
+        },
     )
-    if not party_df.empty and not is_staff:
+    if not party_df.empty and str(current_user().get("role", "staff")).lower() != "staff":
         df_download(party_df, "shubhvastra_all_parties.csv", "Download Party List CSV")
 
 
 def page_agents():
-    if current_user().get("role") == "staff":
-        st.error("Agent Master access ફક્ત Admin અને Member માટે છે.")
-        return
     st.title("Agent Master")
     with st.expander("＋ Add New Agent", expanded=False):
         with st.form("agent_add"):
@@ -363,20 +406,18 @@ def page_agents():
                 elif one("SELECT id FROM agents WHERE LOWER(agent_name)=LOWER(:n)",{"n":name.strip()}): st.error("આ Agent Name પહેલેથી છે.")
                 else: run("INSERT INTO agents(agent_name,phone_number) VALUES(:n,:p)",{"n":name.strip(),"p":phone.strip()}); st.success("Agent save થયો."); st.rerun()
     df=table("SELECT id AS ID,agent_name AS \"Agent Name\",phone_number AS \"Phone Number\" FROM agents ORDER BY agent_name")
-    if is_admin() and not df.empty:
-        with st.expander("Edit Agent"):
-            aid=st.selectbox("Select Agent",df.ID.tolist(),format_func=lambda x: df.loc[df.ID==x,"Agent Name"].iloc[0],key="agent_edit_id")
-            old=one("SELECT * FROM agents WHERE id=:id",{"id":int(aid)})
-            with st.form("agent_edit"):
-                n=st.text_input("Agent Name",old["agent_name"]); p=st.text_input("Phone Number",old["phone_number"])
-                if st.form_submit_button("Save Changes",type="primary"):
-                    run("UPDATE agents SET agent_name=:n,phone_number=:p WHERE id=:id",{"n":n.strip(),"p":p.strip(),"id":int(aid)}); st.success("Agent update થયો."); st.rerun()
+    if not df.empty:
+        if is_admin():
+            with st.expander("Edit Agent"):
+                aid=st.selectbox("Select Agent",df.ID.tolist(),format_func=lambda x: df.loc[df.ID==x,"Agent Name"].iloc[0],key="agent_edit_id")
+                old=one("SELECT * FROM agents WHERE id=:id",{"id":int(aid)})
+                with st.form("agent_edit"):
+                    n=st.text_input("Agent Name",old["agent_name"]); p=st.text_input("Phone Number",old["phone_number"])
+                    if st.form_submit_button("Save Changes",type="primary"):
+                        run("UPDATE agents SET agent_name=:n,phone_number=:p WHERE id=:id",{"n":n.strip(),"p":p.strip(),"id":int(aid)}); st.success("Agent update થયો."); st.rerun()
 
 
 def page_parties():
-    if current_user().get("role") == "staff":
-        st.error("Party Master access ફક્ત Admin અને Member માટે છે.")
-        return
     st.title("Party Master")
     agents=q("SELECT id,agent_name FROM agents ORDER BY agent_name")
     with st.expander("＋ Add New Party", expanded=False):
@@ -394,18 +435,19 @@ def page_parties():
     search=st.text_input("Search Party Name / Phone / City")
     df=q("SELECT p.id AS ID,p.party_name AS \"Party Name\",p.phone_number AS Phone,p.address AS Address,p.city AS City,p.state AS State,p.gst_number AS GST,p.reference AS Reference,COALESCE(a.agent_name,'') AS Agent,p.transport_details AS Transport FROM parties p LEFT JOIN agents a ON a.id=p.agent_id WHERE (:q='' OR LOWER(p.party_name) LIKE LOWER(:likeq) OR p.phone_number LIKE :likeq OR LOWER(p.city) LIKE LOWER(:likeq)) ORDER BY p.party_name LIMIT 1000",{"q":search,"likeq":f"%{search}%"})
     st.dataframe(df,use_container_width=True,hide_index=True)
-    if is_admin() and not df.empty:
-        with st.expander("Edit Selected Party"):
-            pid=st.selectbox("Select Party",df.ID.tolist(),format_func=lambda x:df.loc[df.ID==x,"Party Name"].iloc[0],key="party_edit_id")
-            old=one("SELECT * FROM parties WHERE id=:id",{"id":int(pid)})
-            with st.form("party_edit"):
-                c=st.columns(3); n=c[0].text_input("Party Name",old["party_name"]); p=c[1].text_input("Phone",old["phone_number"]); ref=c[2].selectbox("Reference",REFERENCES,index=REFERENCES.index(old["reference"]) if old["reference"] in REFERENCES else 1)
-                c=st.columns(3); a=c[0].text_input("Address",old["address"]); city=c[1].text_input("City",old["city"]); state=c[2].text_input("State",old["state"])
-                c=st.columns(3); gst=c[0].text_input("GST Number",old["gst_number"]); td=c[1].text_input("Transport",old["transport_details"]); tg=c[2].text_input("Transport GST",old["transport_gst_number"])
-                aid_opts=[None]+agents.id.tolist(); cur=old["agent_id"] if old["agent_id"] in aid_opts else None
-                aid=st.selectbox("Agent",aid_opts,index=aid_opts.index(cur),format_func=lambda x:"— None —" if x is None else agents.loc[agents.id==x,"agent_name"].iloc[0])
-                if st.form_submit_button("Save Changes",type="primary"):
-                    run("UPDATE parties SET party_name=:n,phone_number=:p,address=:a,city=:c,state=:s,gst_number=:g,reference=:r,transport_details=:td,transport_gst_number=:tg,agent_id=:aid WHERE id=:id",{"n":n.strip(),"p":p.strip(),"a":a.strip(),"c":city.strip(),"s":state.strip(),"g":gst.strip(),"r":ref,"td":td.strip(),"tg":tg.strip(),"aid":aid,"id":int(pid)}); st.success("Party update થઈ."); st.rerun()
+    if not df.empty:
+        if is_admin():
+            with st.expander("Edit Selected Party"):
+                pid=st.selectbox("Select Party",df.ID.tolist(),format_func=lambda x:df.loc[df.ID==x,"Party Name"].iloc[0],key="party_edit_id")
+                old=one("SELECT * FROM parties WHERE id=:id",{"id":int(pid)})
+                with st.form("party_edit"):
+                    c=st.columns(3); n=c[0].text_input("Party Name",old["party_name"]); p=c[1].text_input("Phone",old["phone_number"]); ref=c[2].selectbox("Reference",REFERENCES,index=REFERENCES.index(old["reference"]) if old["reference"] in REFERENCES else 1)
+                    c=st.columns(3); a=c[0].text_input("Address",old["address"]); city=c[1].text_input("City",old["city"]); state=c[2].text_input("State",old["state"])
+                    c=st.columns(3); gst=c[0].text_input("GST Number",old["gst_number"]); td=c[1].text_input("Transport",old["transport_details"]); tg=c[2].text_input("Transport GST",old["transport_gst_number"])
+                    aid_opts=[None]+agents.id.tolist(); cur=old["agent_id"] if old["agent_id"] in aid_opts else None
+                    aid=st.selectbox("Agent",aid_opts,index=aid_opts.index(cur),format_func=lambda x:"— None —" if x is None else agents.loc[agents.id==x,"agent_name"].iloc[0])
+                    if st.form_submit_button("Save Changes",type="primary"):
+                        run("UPDATE parties SET party_name=:n,phone_number=:p,address=:a,city=:c,state=:s,gst_number=:g,reference=:r,transport_details=:td,transport_gst_number=:tg,agent_id=:aid WHERE id=:id",{"n":n.strip(),"p":p.strip(),"a":a.strip(),"c":city.strip(),"s":state.strip(),"g":gst.strip(),"r":ref,"td":td.strip(),"tg":tg.strip(),"aid":aid,"id":int(pid)}); st.success("Party update થઈ."); st.rerun()
     if is_admin():
         df_download(df,"shubhvastra_parties.csv","Export Parties CSV")
         st.subheader("Import Parties CSV")
@@ -428,12 +470,8 @@ def page_parties():
 
 
 def page_sku():
-    if current_user().get("role") == "staff":
-        st.error("Item Master access ફક્ત Admin અને Member માટે છે.")
-        return
     st.title("Item Master")
-    tab_names = ["Add New SKU", "Edit SKU"] if is_admin() else ["Add New SKU"]
-    tabs=st.tabs(tab_names)
+    tabs=st.tabs(["Add New SKU","Edit SKU"])
     with tabs[0]:
         with st.form("sku_add",clear_on_submit=True):
             c=st.columns(2); sku=c[0].text_input("SKU Number *"); rate=c[1].number_input("Sale Rate *",min_value=0.0,step=1.0,format="%.2f")
@@ -442,78 +480,137 @@ def page_sku():
                 elif one("SELECT id FROM sku_master WHERE LOWER(sku_number)=LOWER(:s)",{"s":sku.strip()}): st.error("આ SKU પહેલેથી છે.")
                 else: run("INSERT INTO sku_master(sku_number,sale_rate) VALUES(:s,:r)",{"s":sku.strip(),"r":rate}); st.success("SKU save થયો."); st.rerun()
         table("SELECT sku_number AS \"SKU Number\",sale_rate AS \"Sale Rate\" FROM sku_master ORDER BY sku_number")
-    if is_admin():
-      with tabs[1]:
-        df=get_skus()
-        if df.empty: st.info("હજુ SKU નથી.")
+    with tabs[1]:
+        if not is_admin():
+            st.info("SKU edit માત્ર Admin કરી શકે છે.")
         else:
-            sid=st.selectbox("SKU List",df.id.tolist(),format_func=lambda x:df.loc[df.id==x,"sku_number"].iloc[0],key="sku_edit_id")
-            old=one("SELECT * FROM sku_master WHERE id=:id",{"id":int(sid)})
-            with st.form("sku_edit_form"):
-                n=st.text_input("SKU Number",old["sku_number"]); r=st.number_input("Sale Rate",min_value=0.0,value=float(old["sale_rate"]),step=1.0,format="%.2f")
-                if st.form_submit_button("Save Changes",type="primary"):
-                    run("UPDATE sku_master SET sku_number=:s,sale_rate=:r,updated_at=CURRENT_TIMESTAMP WHERE id=:id",{"s":n.strip(),"r":r,"id":int(sid)}); st.success("SKU update થયો. જૂના orders ના rates બદલાતા નથી."); st.rerun()
-            st.dataframe(df[["sku_number","sale_rate"]].rename(columns={"sku_number":"SKU Number","sale_rate":"Sale Rate"}),use_container_width=True,hide_index=True)
-    st.caption("SKU Master ના rate માત્ર નવા Order માટે default થાય છે. જૂના order_items.piece_rate અલગથી સાચવાય છે.")
-    if is_admin():
-        df=get_skus(); df_download(df.rename(columns={"sku_number":"SKU Number","sale_rate":"Sale Rate"}),"shubhvastra_sku.csv","Export SKU CSV")
+            df=get_skus()
+            if df.empty: st.info("હજુ SKU નથી.")
+            else:
+                sid=st.selectbox("SKU List",df.id.tolist(),format_func=lambda x:df.loc[df.id==x,"sku_number"].iloc[0],key="sku_edit_id")
+                old=one("SELECT * FROM sku_master WHERE id=:id",{"id":int(sid)})
+                with st.form("sku_edit_form"):
+                    n=st.text_input("SKU Number",old["sku_number"]); r=st.number_input("Sale Rate",min_value=0.0,value=float(old["sale_rate"]),step=1.0,format="%.2f")
+                    if st.form_submit_button("Save Changes",type="primary"):
+                        run("UPDATE sku_master SET sku_number=:s,sale_rate=:r,updated_at=CURRENT_TIMESTAMP WHERE id=:id",{"s":n.strip(),"r":r,"id":int(sid)}); st.success("SKU update થયો. જૂના orders ના rates બદલાતા નથી."); st.rerun()
+                st.dataframe(df[["sku_number","sale_rate"]].rename(columns={"sku_number":"SKU Number","sale_rate":"Sale Rate"}),use_container_width=True,hide_index=True)
+        st.caption("SKU Master ના rate માત્ર નવા Order માટે default થાય છે. જૂના order_items.piece_rate અલગથી સાચવાય છે.")
+        if is_admin():
+            df=get_skus(); df_download(df.rename(columns={"sku_number":"SKU Number","sale_rate":"Sale Rate"}),"shubhvastra_sku.csv","Export SKU CSV")
 
 
 def page_order_form(edit_id=None):
-    if edit_id and current_user().get("role") != "admin":
-        st.error("Member માત્ર નવો Order બનાવી શકે છે. જૂનો Order edit કરવાનો access Admin પાસે જ છે.")
-        return
-    st.title("Order Form" if not edit_id else f"Edit Order #{edit_id}")
+    st.title("New Order" if not edit_id else f"Edit Order #{edit_id}")
+    if st.button("📋 Order List", key="new_order_list_btn"):
+        st.session_state["pending_page"] = "Orders"; st.rerun()
     parties=get_parties(); skus=get_skus()
     if parties.empty: st.warning("Order બનાવવા પહેલાં Party Master માં Party ઉમેરો."); return
-    if skus.empty: st.warning("Item Master માં SKU ઉમેરો અથવા Particulars લખો.")
     existing=one("SELECT * FROM orders WHERE id=:id",{"id":int(edit_id)}) if edit_id else None
     if edit_id and not existing: st.error("Order મળ્યો નથી."); return
     if edit_id and one("SELECT d.id FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id WHERE i.order_id=:id LIMIT 1",{"id":int(edit_id)}): st.error("Dispatch થયેલો order edit કરી શકાતો નથી."); return
-    if edit_id:
-        old_items=q("SELECT * FROM order_items WHERE order_id=:id ORDER BY sr_no",{"id":int(edit_id)})
-        for ix,row in old_items.iterrows():
-            sz=q("SELECT size_code,ordered_qty FROM order_item_sizes WHERE order_item_id=:id",{"id":int(row.id)})
-            st.session_state[f"ed_sku_{ix}"]=row.particulars; st.session_state[f"ed_rate_{ix}"]=float(row.piece_rate); st.session_state[f"ed_disc_{ix}"]=float(row.discount)
-            for size in SIZES: st.session_state[f"ed_{size}_{ix}"]=int(sz.loc[sz.size_code==size,"ordered_qty"].sum())
-    p_names=parties.party_name.tolist(); pids=parties.id.astype(int).tolist()
+    old_items=q("SELECT * FROM order_items WHERE order_id=:id ORDER BY sr_no",{"id":int(edit_id)}) if edit_id else pd.DataFrame()
+    for ix,row in old_items.iterrows():
+        if f"ord_sku_{ix}" not in st.session_state: st.session_state[f"ord_sku_{ix}"]=str(row.particulars)
+        if f"ord_rate_{ix}" not in st.session_state: st.session_state[f"ord_rate_{ix}"]=float(row.piece_rate)
+        if f"ord_disc_{ix}" not in st.session_state: st.session_state[f"ord_disc_{ix}"]=float(row.discount)
+        sz=q("SELECT size_code,ordered_qty FROM order_item_sizes WHERE order_item_id=:id",{"id":int(row.id)})
+        for size in SIZES:
+            if f"ord_qty_{ix}_{size}" not in st.session_state: st.session_state[f"ord_qty_{ix}_{size}"]=int(sz.loc[sz.size_code==size,"ordered_qty"].sum())
+    if "new_order_row_count" not in st.session_state: st.session_state["new_order_row_count"]=max(5,len(old_items) if edit_id else 5)
+    row_count=max(5,int(st.session_state["new_order_row_count"]))
+    pids=[0]+parties.id.astype(int).tolist()
     def label_party(pid):
+        if not pid: return "Select Party"
         rr=parties.loc[parties.id==pid]
         return rr.iloc[0].party_name if not rr.empty else str(pid)
-    default_party=int(existing["party_id"]) if existing else pids[0]
-    n_items=max(1,len(old_items) if edit_id else 1)
-    n=st.number_input("Number of item rows",min_value=1,max_value=100,value=n_items,step=1,key=f"rows_{edit_id or 'new'}")
-    with st.form(f"order_form_{edit_id or 'new'}"):
-        c=st.columns(3)
-        order_no=int(existing["order_no"]) if existing else get_order_no(); c[0].text_input("Order Number",str(order_no),disabled=True)
-        od_default=str(existing["order_date"])[:10] if existing else date.today().isoformat()
-        od=c[1].date_input("Order Date",value=date.fromisoformat(od_default))
-        party_id=c[2].selectbox("Party Name *",pids,index=pids.index(default_party) if default_party in pids else 0,format_func=label_party)
+    default_party=int(existing["party_id"]) if existing else 0
+    st.markdown('<div class="section-card">',unsafe_allow_html=True)
+    top=st.columns([1.2,1,2])
+    od_default=str(existing["order_date"])[:10] if existing else date.today().isoformat()
+    od=top[0].date_input("Order Date *",value=date.fromisoformat(od_default),key=f"ord_date_{edit_id or 'new'}",disabled=bool(edit_id))
+    shown_no=int(existing["order_no"]) if existing else get_order_no()
+    top[1].text_input("Order Number",str(shown_no),disabled=True,key=f"ord_no_{edit_id or 'new'}")
+    party_key=f"ord_party_{edit_id or 'new'}"
+    if party_key not in st.session_state: st.session_state[party_key]=default_party
+    party_id=top[2].selectbox("Party Name *",pids,index=pids.index(st.session_state[party_key]) if st.session_state[party_key] in pids else 0,format_func=label_party,key=party_key,disabled=bool(edit_id))
+    if party_id:
         party=parties.loc[parties.id==party_id].iloc[0]
-        st.caption(f"Phone: {party.phone_number} · City: {party.city} · State: {party.state} · Agent: {party.agent_name}")
-        st.subheader("Item Details")
-        rows=[]
-        for ix in range(int(n)):
-            st.markdown(f"**Item {ix+1}**")
-            old=old_items.iloc[ix] if edit_id and ix<len(old_items) else None
-            c=st.columns([3,1.2,1,1,1,1,1])
-            default_sku=(str(old.particulars) if old is not None else (skus.sku_number.iloc[0] if not skus.empty else ""))
-            sku_options=skus.sku_number.tolist()
-            if default_sku and default_sku not in sku_options: sku_options=[default_sku]+sku_options
-            sku=c[0].selectbox("Particulars / SKU",sku_options or [""],index=sku_options.index(default_sku) if default_sku in sku_options else 0,key=f"sku_{edit_id or 'new'}_{ix}")
-            default_rate=float(old.piece_rate) if old is not None else float(skus.loc[skus.sku_number==sku,"sale_rate"].iloc[0]) if not skus.empty and sku in skus.sku_number.tolist() else 0.0
-            rate=c[1].number_input("Piece Rate",min_value=0.0,value=default_rate,step=1.0,format="%.2f",key=f"rate_{edit_id or 'new'}_{ix}")
-            disc=c[2].number_input("Discount",min_value=0.0,value=float(old.discount) if old is not None else 0.0,step=1.0,format="%.2f",key=f"disc_{edit_id or 'new'}_{ix}")
-            sizes={}
-            old_sizes=q("SELECT size_code,ordered_qty FROM order_item_sizes WHERE order_item_id=:id",{"id":int(old.id)}) if old is not None else pd.DataFrame()
-            for j,size in enumerate(SIZES):
-                oldq=int(old_sizes.loc[old_sizes.size_code==size,"ordered_qty"].sum()) if not old_sizes.empty else 0
-                sizes[size]=c[3+j].number_input(size,min_value=0,value=oldq,step=1,key=f"qty_{edit_id or 'new'}_{ix}_{size}")
-            rows.append({"sku":sku,"rate":rate,"discount":disc,"sizes":sizes})
-        narration=st.text_area("Additional Order Details",value=str(existing["narration"] or "") if existing else "")
-        save=st.form_submit_button("Save Changes" if edit_id else "Save Order",type="primary",use_container_width=True)
+        info=st.columns(4)
+        info[0].text_input("Phone",str(party.phone_number),disabled=True,key=f"ord_phone_{edit_id or 'new'}")
+        info[1].text_input("City",str(party.city),disabled=True,key=f"ord_city_{edit_id or 'new'}")
+        info[2].text_input("State",str(party.state),disabled=True,key=f"ord_state_{edit_id or 'new'}")
+        info[3].text_input("Agent",str(party.agent_name),disabled=True,key=f"ord_agent_{edit_id or 'new'}")
+    st.markdown('</div>',unsafe_allow_html=True)
+    st.subheader("Item Details")
+    st.caption("શરૂઆતમાં 5 rows દેખાશે. છેલ્લી row માં SKU અથવા quantity ભરશો એટલે આગળની row આપમેળે ઉમેરાશે (મહત્તમ 999).")
+    sku_options=[""]+skus.sku_number.tolist()
+    rows=[]
+    header=st.columns([.5,3,1,1,1,1,1.2,1.3,1.2])
+    for col,label in zip(header,["Sr.","Particulars / SKU","M","L","XL","XXL","Discount","WSP Rate","Qty"]): col.markdown(f"**{label}**")
+    last_filled=False
+    for ix in range(row_count):
+        old=old_items.iloc[ix] if edit_id and ix<len(old_items) else None
+        c=st.columns([.5,3,1,1,1,1,1.2,1.3,1.2])
+        c[0].write(str(ix+1))
+        skey=f"ord_sku_{ix}"
+        if skey not in st.session_state: st.session_state[skey]=str(old.particulars) if old is not None else ""
+        cur=st.session_state[skey]
+        opts=sku_options.copy()
+        if cur and cur not in opts: opts.insert(1,cur)
+        sku=c[1].selectbox("Particulars / SKU",opts,index=opts.index(cur) if cur in opts else 0,key=skey,label_visibility="collapsed")
+        rate_default=float(old.piece_rate) if old is not None else float(skus.loc[skus.sku_number==sku,"sale_rate"].iloc[0]) if not skus.empty and sku in skus.sku_number.tolist() else 0.0
+        rkey=f"ord_rate_{ix}"
+        if rkey not in st.session_state: st.session_state[rkey]=rate_default
+        else:
+            if not edit_id and sku and st.session_state.get(f"ord_last_sku_{ix}")!=sku: st.session_state[rkey]=rate_default
+        st.session_state[f"ord_last_sku_{ix}"]=sku
+        sizes={}
+        for j,size in enumerate(SIZES):
+            qkey=f"ord_qty_{ix}_{size}"
+            if qkey not in st.session_state: st.session_state[qkey]=0
+            sizes[size]=c[2+j].number_input(size,min_value=0,step=1,key=qkey,label_visibility="collapsed")
+        disc_key=f"ord_disc_{ix}"
+        if disc_key not in st.session_state: st.session_state[disc_key]=float(old.discount) if old is not None else 0.0
+        disc=c[6].number_input("Discount",min_value=0.0,step=1.0,format="%.2f",key=disc_key,label_visibility="collapsed",disabled=bool(edit_id))
+        rate=c[7].number_input("WSP Rate",min_value=0.0,step=1.0,format="%.2f",key=rkey,label_visibility="collapsed",disabled=bool(edit_id))
+        qty=sum(sizes.values())
+        c[8].markdown(f"**{qty}**")
+        rows.append({"sku":sku,"rate":rate,"discount":disc,"sizes":sizes})
+        if ix==row_count-1 and (sku or qty>0): last_filled=True
+    if last_filled and row_count<999:
+        st.session_state["new_order_row_count"]=row_count+1
+        st.rerun()
+    packaging_options=["Chain Bag","Box Packing","Sherwani Bag Packaging"]
+    old_pack=[]
+    if existing:
+        try: old_pack=json.loads(existing.get("packaging") or "[]")
+        except Exception: old_pack=[]
+    st.subheader("Packaging *")
+    packaging=st.multiselect("Select one or more packaging options",packaging_options,default=old_pack,key=f"ord_pack_{edit_id or 'new'}",disabled=bool(edit_id))
+    st.subheader("GST *")
+    gst_options=["5% GST","5-18% GST"]
+    old_gst=str(existing.get("gst_type") or "") if existing else ""
+    gst=st.radio("Select GST option",gst_options,index=gst_options.index(old_gst) if old_gst in gst_options else None,horizontal=True,key=f"ord_gst_{edit_id or 'new'}",disabled=bool(edit_id))
+    narration=st.text_area("Additional Order Details",value=str(existing["narration"] or "") if existing else "",key=f"ord_narration_{edit_id or 'new'}",disabled=bool(edit_id))
+    buttons=st.columns(3)
+    save=buttons[0].button("Save Order" if not edit_id else "Save Item Changes",type="primary",use_container_width=True)
+    clean=buttons[1].button("Clean Form",use_container_width=True)
+    if buttons[2].button("Order List",use_container_width=True): st.session_state["pending_page"]="Orders"; st.rerun()
+    if clean:
+        st.session_state["confirm_clean_order_form"]=True
+    if st.session_state.get("confirm_clean_order_form"):
+        st.warning("શું તમે આ આખું order form clean કરવા માંગો છો?")
+        yes,no=st.columns(2)
+        if yes.button("Yes, Clean Form",type="primary"):
+            for k in list(st.session_state.keys()):
+                if k.startswith(("ord_sku_","ord_rate_","ord_disc_","ord_qty_","ord_last_sku_","ord_pack_","ord_gst_","ord_narration_","ord_party_","ord_date_")): st.session_state.pop(k,None)
+            st.session_state["new_order_row_count"]=5; st.session_state.pop("confirm_clean_order_form",None); st.session_state.pop("edit_order_id",None); st.session_state["pending_page"]="New Order"; st.rerun()
+        if no.button("No, Go Back"): st.session_state.pop("confirm_clean_order_form",None); st.rerun()
     if save:
         try:
+            if not party_id: raise ValueError("પહેલાં Party પસંદ કરો.")
+            if not packaging: raise ValueError("Packaging પસંદ કરવું જરૂરી છે.")
+            if not gst: raise ValueError("GST option પસંદ કરવો જરૂરી છે.")
             cleaned=[]
             for r in rows:
                 if not str(r["sku"]).strip(): continue
@@ -522,47 +619,81 @@ def page_order_form(edit_id=None):
             if not cleaned: raise ValueError("ઓછામાં ઓછો એક item ઉમેરો.")
             with engine.begin() as conn:
                 if edit_id:
-                    order_no = int(conn.execute(text("SELECT order_no FROM orders WHERE id=:id"), {"id":int(edit_id)}).scalar_one())
-                    conn.execute(text("UPDATE orders SET order_date=:d,party_id=:p,narration=:n WHERE id=:id"),{"d":od,"p":int(party_id),"n":narration.strip(),"id":int(edit_id)})
+                    conn.execute(text("UPDATE orders SET order_date=:d,party_id=:p,packaging=:pack,gst_type=:gst,narration=:n WHERE id=:id"),{"d":od,"p":int(party_id),"pack":json.dumps(packaging),"gst":gst,"n":narration.strip(),"id":int(edit_id)})
                     conn.execute(text("DELETE FROM order_items WHERE order_id=:id"),{"id":int(edit_id)}); oid=int(edit_id)
+                    order_no=int(existing["order_no"])
                 else:
-                    if engine.dialect.name == "postgresql":
-                        conn.execute(text("LOCK TABLE orders IN EXCLUSIVE MODE"))
+                    if engine.dialect.name == "postgresql": conn.execute(text("LOCK TABLE orders IN EXCLUSIVE MODE"))
                     order_no=int(conn.execute(text("SELECT COALESCE(MAX(order_no),1100)+1 FROM orders")).scalar_one())
-                    oid=conn.execute(text("INSERT INTO orders(order_no,order_date,party_id,narration) VALUES(:no,:d,:p,:n) RETURNING id"),{"no":order_no,"d":od,"p":int(party_id),"n":narration.strip()}).scalar_one()
+                    oid=conn.execute(text("INSERT INTO orders(order_no,order_date,party_id,packaging,gst_type,narration) VALUES(:no,:d,:p,:pack,:gst,:n) RETURNING id"),{"no":order_no,"d":od,"p":int(party_id),"pack":json.dumps(packaging),"gst":gst,"n":narration.strip()}).scalar_one()
                 for ix,r in enumerate(cleaned,1):
                     iid=conn.execute(text("INSERT INTO order_items(order_id,sr_no,particulars,piece_rate,discount) VALUES(:o,:sr,:sku,:rate,:disc) RETURNING id"),{"o":oid,"sr":ix,"sku":r["sku"],"rate":r["rate"],"disc":r["discount"]}).scalar_one()
                     for size,qty in r["sizes"].items():
                         if int(qty)>0: conn.execute(text("INSERT INTO order_item_sizes(order_item_id,size_code,ordered_qty) VALUES(:i,:s,:q)"),{"i":iid,"s":size,"q":int(qty)})
-                actor=current_user()
-                conn.execute(text("INSERT INTO activity_log(username,role,action,details) VALUES(:u,:r,:a,:d)"),{"u":actor["username"],"r":actor["role"],"a":"CREATE_ORDER" if not edit_id else "EDIT_ORDER","d":f"Order #{order_no}"})
-            st.success(f"Order #{order_no} save થયો.")
-            for key in list(st.session_state.keys()):
-                if key.startswith(("sku_new_","rate_new_","disc_new_","qty_new_")): st.session_state.pop(key,None)
-            st.session_state.pop("edit_order_id", None)
-            st.session_state["pending_page"]="Orders"; st.rerun()
+            st.session_state["last_saved_order_id"]=int(oid); st.session_state["show_pdf_prompt"]=True
+            st.success(f"Order #{order_no} save થયો. હવે PDF save કરવી છે?")
+            st.rerun()
         except Exception as e: st.error(f"Order save ન થયો: {e}")
+    if st.session_state.get("show_pdf_prompt") and st.session_state.get("last_saved_order_id"):
+        st.info("શું આ Order ની PDF download કરવી છે?")
+        y,n=st.columns(2)
+        if y.button("Yes — Download PDF",type="primary"):
+            oid=int(st.session_state["last_saved_order_id"])
+            odf=q("SELECT o.*,p.party_name,p.phone_number,p.address,p.city,p.state,p.gst_number,p.transport_details,p.transport_gst_number,COALESCE(a.agent_name,'') agent_name FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id WHERE o.id=:id",{"id":oid}).iloc[0].to_dict()
+            try: odf["packaging"]=", ".join(json.loads(odf.get("packaging") or "[]"))
+            except Exception: pass
+            it=q("SELECT i.sr_no AS Sr,i.particulars AS Particulars,i.piece_rate AS \"WSP Rate\",i.discount AS Discount,s.size_code AS Size,s.ordered_qty AS Qty,(SELECT COALESCE(SUM(d.qty),0) FROM order_dispatches d WHERE d.order_size_id=s.id) AS Dispatched FROM order_items i JOIN order_item_sizes s ON s.order_item_id=i.id WHERE i.order_id=:id ORDER BY i.sr_no,s.size_code",{"id":oid})
+            st.download_button("Download Order PDF",order_pdf_bytes(odf,it),file_name=f"shubhvastra_order_{odf['order_no']}.pdf",mime="application/pdf",type="primary")
+            st.caption("PDF download button દબાવીને file save કરો. પછી No / Continue દબાવો.")
+        if n.button("No — Continue to New Order"):
+            for k in list(st.session_state.keys()):
+                if k.startswith(("ord_sku_","ord_rate_","ord_disc_","ord_qty_","ord_last_sku_","ord_pack_","ord_gst_","ord_narration_","ord_party_","ord_date_")): st.session_state.pop(k,None)
+            st.session_state["new_order_row_count"]=5; st.session_state.pop("show_pdf_prompt",None); st.session_state.pop("last_saved_order_id",None); st.session_state.pop("edit_order_id",None); st.session_state["pending_page"]="New Order"; st.rerun()
 
 
 def page_orders():
-    st.title("Orders")
-    if st.button("＋ Create New Order",type="primary"): st.session_state.pop("edit_order_id",None); st.session_state["pending_page"]="Order Form"; st.rerun()
+    st.title("Order List")
+    if st.button("＋ Create New Order",type="primary"): st.session_state.pop("edit_order_id",None); st.session_state["pending_page"]="New Order"; st.rerun()
     search=st.text_input("Search Order Number / Party")
-    df=q("SELECT o.id AS ID,o.order_no AS \"Order No\",o.order_date AS \"Order Date\",p.party_name AS \"Party Name\",p.city AS City,p.state AS State,o.cancelled AS Cancelled FROM orders o JOIN parties p ON p.id=o.party_id WHERE (:s='' OR CAST(o.order_no AS VARCHAR) LIKE :likeq OR LOWER(p.party_name) LIKE LOWER(:likeq)) ORDER BY o.order_no DESC LIMIT 1000",{"s":search,"likeq":f"%{search}%"})
+    df=q("SELECT o.id AS ID,o.order_no AS \"Order Number\",o.order_date AS \"Order Date\",p.party_name AS \"Party Name\",COALESCE(SUM(s.ordered_qty),0) AS Qty,COALESCE(SUM(s.ordered_qty * i.piece_rate),0) AS Amount,COALESCE(a.agent_name,'') AS \"Agent Name\",o.cancelled AS Cancelled FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id LEFT JOIN order_items i ON i.order_id=o.id LEFT JOIN order_item_sizes s ON s.order_item_id=i.id WHERE (:s='' OR CAST(o.order_no AS VARCHAR) LIKE :likeq OR LOWER(p.party_name) LIKE LOWER(:likeq)) GROUP BY o.id,o.order_no,o.order_date,p.party_name,a.agent_name,o.cancelled ORDER BY o.order_no ASC LIMIT 1000",{"s":search,"likeq":f"%{search}%"})
     st.dataframe(df.drop(columns=["ID"]) if not df.empty else df,use_container_width=True,hide_index=True)
     if not df.empty:
-        oid=st.selectbox("Select Order to view/edit",df.ID.tolist(),format_func=lambda x:f"#{df.loc[df.ID==x,'Order No'].iloc[0]} — {df.loc[df.ID==x,'Party Name'].iloc[0]}")
+        oid=st.selectbox("Select Order to view/edit",df.ID.tolist(),format_func=lambda x:f"#{df.loc[df.ID==x,'Order Number'].iloc[0]} — {df.loc[df.ID==x,'Party Name'].iloc[0]}")
         c=st.columns(3)
         if c[0].button("View Order Details",use_container_width=True): st.session_state["selected_order"]=int(oid); st.session_state["pending_page"]="Order Details"; st.rerun()
         dispatched=bool(one("SELECT id FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id WHERE i.order_id=:id LIMIT 1",{"id":int(oid)}))
-        if is_admin() and c[1].button("Edit Order",disabled=dispatched,use_container_width=True): st.session_state["edit_order_id"]=int(oid); st.session_state["pending_page"]="Order Form"; st.rerun()
-        if is_admin() and c[2].button("Cancel / Restore Order",use_container_width=True):
+        if c[1].button("Edit Order",disabled=dispatched,use_container_width=True): st.session_state["edit_order_id"]=int(oid); st.session_state["pending_page"]="New Order"; st.rerun()
+        if c[2].button("Cancel / Restore Order",use_container_width=True):
             old=int(one("SELECT cancelled FROM orders WHERE id=:id",{"id":int(oid)})["cancelled"])
             run("UPDATE orders SET cancelled=:v WHERE id=:id",{"v":0 if old else 1,"id":int(oid)}); st.success("Order status update થયો."); st.rerun()
-    if is_admin():
-      st.subheader("CSV Import / Export")
-      a,b=st.columns(2)
-      with a:
+    if not df.empty:
+        st.subheader("Order Actions")
+        order_ids=df.ID.astype(int).tolist()
+        chosen=st.selectbox("Choose Order",order_ids,format_func=lambda x:f"Order #{int(df.loc[df.ID==x, 'Order Number'].iloc[0])} — {df.loc[df.ID==x, 'Party Name'].iloc[0]}",key="orders_action_select")
+        act=st.columns(4)
+        if act[0].button("Edit Order",use_container_width=True):
+            st.session_state["edit_order_id"]=int(chosen); st.session_state["pending_page"]="New Order"; st.rerun()
+        pdfrow=one("SELECT o.*,p.party_name,p.phone_number,p.address,p.city,p.state,p.gst_number,p.transport_details,p.transport_gst_number,COALESCE(a.agent_name,'') agent_name FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id WHERE o.id=:id",{"id":int(chosen)})
+        if pdfrow:
+            pdfrow["packaging"] = ", ".join(json.loads(pdfrow.get("packaging") or "[]")) if str(pdfrow.get("packaging") or "").startswith("[") else str(pdfrow.get("packaging") or "")
+            pdfitems=q("SELECT i.sr_no AS Sr,i.particulars AS Particulars,i.piece_rate AS \"WSP Rate\",i.discount AS Discount,s.size_code AS Size,s.ordered_qty AS Qty,(SELECT COALESCE(SUM(d.qty),0) FROM order_dispatches d WHERE d.order_size_id=s.id) AS Dispatched FROM order_items i JOIN order_item_sizes s ON s.order_item_id=i.id WHERE i.order_id=:id ORDER BY i.sr_no,s.size_code",{"id":int(chosen)})
+            act[1].download_button("Download PDF",order_pdf_bytes(pdfrow,pdfitems),file_name=f"shubhvastra_order_{pdfrow['order_no']}.pdf",mime="application/pdf",use_container_width=True)
+        if str(current_user().get("role", "staff")).lower() in ("admin", "member"):
+            if act[2].button("Delete Order",use_container_width=True): st.session_state["confirm_delete_order_id"]=int(chosen)
+        if str(current_user().get("role", "staff")).lower() in ("admin", "member") and st.session_state.get("confirm_delete_order_id")==int(chosen):
+            st.warning("Delete order માટે authorized delete password નાખો. આ action પાછું ફેરવી શકાતું નથી.")
+            dp=st.text_input("Delete Password",type="password",key="order_delete_password")
+            if st.button("Confirm Delete",type="primary"):
+                if dp != "9414": st.error("Password ખોટો છે.")
+                else:
+                    dispatched=one("SELECT d.id FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id WHERE i.order_id=:id LIMIT 1",{"id":int(chosen)})
+                    if dispatched: st.error("Dispatch થયેલો order delete કરી શકાતો નથી.")
+                    else:
+                        run("DELETE FROM order_items WHERE order_id=:id",{"id":int(chosen)}); run("DELETE FROM orders WHERE id=:id",{"id":int(chosen)})
+                        st.session_state.pop("confirm_delete_order_id",None); st.success("Order delete થયો."); st.rerun()
+    st.subheader("CSV Import / Export")
+    a,b=st.columns(2)
+    with a:
         sample=pd.DataFrame(columns=["Order Number (optional)","Order Date (YYYY-MM-DD)","Party Name","Particulars","Piece Rate","Discount","M Qty","L Qty","XL Qty","XXL Qty","Narration"])
         sample.loc[0]=["","2026-10-27","Existing Party","SKU-001",0,0,0,0,0,0,""]
         df_download(sample,"shubhvastra_order_import_template.csv","Download Order CSV Template")
@@ -590,7 +721,7 @@ def page_orders():
                         made+=1
                 st.success(f"{made} order import થયા."); st.rerun()
             except Exception as e: st.error(f"CSV import રદ થયો: {e}")
-      with b:
+    with b:
         exp=q("SELECT o.order_no AS \"Order Number\",o.order_date AS \"Order Date\",p.party_name AS \"Party Name\",i.particulars AS Particulars,i.piece_rate AS \"Piece Rate\",i.discount AS Discount,s.size_code AS Size,s.ordered_qty AS Qty,o.narration AS Narration FROM orders o JOIN parties p ON p.id=o.party_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id ORDER BY o.order_no")
         df_download(exp,"shubhvastra_orders_export.csv","Export Orders CSV")
 
@@ -676,7 +807,8 @@ def page_reports():
                     st.dataframe(det,use_container_width=True,hide_index=True)
     with tabs[2]:
         df=q("SELECT i.particulars AS SKU,p.state AS State,SUM(s.ordered_qty) AS \"Ordered Qty\",SUM((SELECT COALESCE(SUM(d.qty),0) FROM order_dispatches d WHERE d.order_size_id=s.id)) AS \"Dispatched Qty\" FROM order_items i JOIN orders o ON o.id=i.order_id JOIN parties p ON p.id=o.party_id JOIN order_item_sizes s ON s.order_item_id=i.id GROUP BY i.particulars,p.state ORDER BY i.particulars,p.state")
-        st.dataframe(df,use_container_width=True,hide_index=True); df_download(df,"shubhvastra_sku_state_sale_report.csv","Export SKU State Report")
+        st.dataframe(df,use_container_width=True,hide_index=True)
+        if is_admin(): df_download(df,"shubhvastra_sku_state_sale_report.csv","Export SKU State Report")
 
 
 def page_users():
@@ -684,7 +816,7 @@ def page_users():
         st.error("આ વિભાગ ફક્ત Main Admin માટે છે.")
         return
     st.title("Admin Panel / User Access")
-    st.caption("Admin, Member અને Staff ના username, password, role અને access અહીંથી નિયંત્રિત કરો. Login screen પર Forgot Password નથી.")
+    st.caption("અહીંથી login username/password, role અને user access નિયંત્રિત કરો. Login screen પર Forgot Password નથી.")
     with st.expander("Create New User", expanded=True):
         with st.form("new_user"):
             c=st.columns(3)
@@ -710,7 +842,7 @@ def page_users():
             st.write(f"Selected user: **{selected['username']}**")
             new_username=st.text_input("Change Username",value=selected["username"])
             new_password=st.text_input("Set New Password (leave blank to keep current)",type="password")
-            new_role=st.selectbox("Role",["admin","member","staff"],index=["admin","member","staff"].index(selected["role"]) if selected["role"] in ["admin","member","staff"] else 2)
+            new_role=st.selectbox("Role",["staff","admin"],index=0 if selected["role"]=="staff" else 1)
             active=st.checkbox("User can login",value=bool(selected["active"]))
             save=st.form_submit_button("Save User Settings",type="primary")
         if save:
@@ -733,7 +865,7 @@ def page_users():
                 st.rerun()
 
 
-BACKUP_TABLES = ["agents", "parties", "sku_master", "orders", "order_items", "order_item_sizes", "order_dispatches", "users", "activity_log"]
+BACKUP_TABLES = ["agents", "parties", "sku_master", "orders", "order_items", "order_item_sizes", "order_dispatches", "users"]
 BACKUP_FORMAT_VERSION = 1
 
 
@@ -798,14 +930,11 @@ def restore_full_backup(uploaded_bytes, filename="backup.zip"):
         try:
             source.deserialize(uploaded_bytes)
             available = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            missing = [name for name in BACKUP_TABLES if name not in available and name != "activity_log"]
+            missing = [name for name in BACKUP_TABLES if name not in available]
             if missing:
                 raise ValueError("આ database માં Shubhvastra ના જરૂરી tables નથી: " + ", ".join(missing) + ". જો આ જૂની party_reporting.db છે તો પહેલા migration format માં convert કરવી પડશે.")
             payload = {"format": "shubhvastra_backup", "version": BACKUP_FORMAT_VERSION, "tables": {}}
             for name in BACKUP_TABLES:
-                if name not in available:
-                    payload["tables"][name] = []
-                    continue
                 cursor = source.execute(f'SELECT * FROM "{name}"')
                 columns = [item[0] for item in cursor.description]
                 payload["tables"][name] = [dict(zip(columns, row)) for row in cursor.fetchall()]
@@ -841,15 +970,9 @@ def page_settings():
     if not is_admin():
         st.error("Utilities ફક્ત Main Admin માટે ઉપલબ્ધ છે.")
         return
-    user_tab, history_tab, backup_tab = st.tabs(["User Name & Password", "History Report", "Backup & Restore"])
+    user_tab, backup_tab = st.tabs(["User Name & Password", "Backup & Restore"])
     with user_tab:
         page_users()
-    with history_tab:
-        st.subheader("User Activity History")
-        st.caption("કયા user એ કયો order create/edit કર્યો તેની history.")
-        hist=q("SELECT created_at AS Date,username AS Username,role AS Role,action AS Action,details AS Details FROM activity_log ORDER BY id DESC LIMIT 2000")
-        st.dataframe(hist,use_container_width=True,hide_index=True)
-        if not hist.empty: df_download(hist,"shubhvastra_user_activity_history.csv","Download History CSV")
     with backup_tab:
         page_backup_restore()
 
@@ -904,11 +1027,11 @@ if not require_login():
     st.stop()
 
 user=current_user()
-role=user.get("role", "staff")
-if role == "admin":
-    menu=["Dashboard","Party Master","Agent Master","Item Master","Order Form","Orders","Order Details","Pending to Dispatched","Order Reports","Utilities / Admin Panel"]
-elif role == "member":
-    menu=["Dashboard","Party Master","Agent Master","Item Master","Order Form","Orders","Order Details","Pending to Dispatched","Order Reports"]
+role_name = str(user.get("role", "staff")).lower()
+if role_name == "admin":
+    menu=["Dashboard","Party Master","Agent Master","Item Master","New Order","Orders","Order Details","Pending to Dispatched","Order Reports","Utilities / Admin Panel"]
+elif role_name == "member":
+    menu=["Dashboard","Party Master","Agent Master","Item Master","New Order","Orders","Order Details","Pending to Dispatched","Order Reports"]
 else:
     menu=["Dashboard","Orders","Order Details","Pending to Dispatched","Order Reports"]
 with st.sidebar:
@@ -929,11 +1052,13 @@ if page=="Dashboard": page_dashboard()
 elif page=="Party Master": page_parties()
 elif page=="Agent Master": page_agents()
 elif page=="Item Master": page_sku()
-elif page=="Order Form": page_order_form(st.session_state.get("edit_order_id"))
+elif page=="New Order":
+    if str(user.get("role", "staff")).lower() == "staff": st.error("આ વિભાગ માટે પરવાનગી નથી.")
+    else: page_order_form(st.session_state.get("edit_order_id"))
 elif page=="Orders": page_orders()
 elif page=="Order Details": page_order_details()
 elif page=="Pending to Dispatched": page_dispatch()
 elif page=="Order Reports": page_reports()
-elif page=="Utilities / Admin Panel": page_settings()
+elif page=="Utilities / Admin Panel" and is_admin(): page_settings()
 
 st.markdown(f"<div style='text-align:center;color:#8b98a9;font-size:11px;padding:20px'>SHUBHVASTRA · Secure Login · {user['role'].title()}</div>",unsafe_allow_html=True)

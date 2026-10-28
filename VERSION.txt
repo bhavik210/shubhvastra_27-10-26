@@ -1,6 +1,2 @@
-SHUBHVASTRA Streamlit Community Cloud Build
-Build date: 2026-10-27
-Revision: PostgreSQL connection diagnostics and placeholder detection
-Entry point: app.py
-Database: PostgreSQL via DATABASE_URL (local SQLite fallback for development)
-Source database is intentionally excluded from this ZIP.
+SHUBHVASTRA STREAMLIT - NEW ORDER UPDATE
+Build date: 2026-10-28

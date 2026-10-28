@@ -47,7 +47,7 @@ DATABASE_URL = "postgresql+psycopg://USER:PASSWORD@HOST:5432/DATABASE?sslmode=re
 Dashboard, Party Master, Agent Master, Item Master/SKU, Order Form, Orders, Order Details, Pending to Dispatched, Order Reports અને Utilities/Backup.
 
 ## નોંધ
-આ Streamlit version છે. Branding, module names અને core business flows જાળવ્યા છે, પરંતુ desktop software નો દરેક pixel અને દરેક advanced workflow સંપૂર્ણ સમાન છે એવો દાવો નથી. CSV/PDF, dispatch, reports અને database migration ને sample data વડે ચકાસો. Login ફરજિયાત છે. Admin, Member અને Staff roles ઉપલબ્ધ છે. Role-wise permissions માટે ROLE_PERMISSIONS_GUJARATI.md જુઓ. Production પહેલાં દરેક role થી login કરીને permission testing કરો.
+આ Streamlit version છે. Branding, module names અને core business flows જાળવ્યા છે, પરંતુ desktop software નો દરેક pixel અને દરેક advanced workflow સંપૂર્ણ સમાન છે એવો દાવો નથી. CSV/PDF, dispatch, reports અને database migration ને sample data વડે ચકાસો. Login disabled હોવાથી આ build માત્ર testing માટે છે.
 
 
 ## Full Backup / Restore (Utilities)
