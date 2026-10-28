@@ -8,7 +8,7 @@ from sqlalchemy.engine import Engine
 from werkzeug.security import generate_password_hash, check_password_hash
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as PDFImage
 
@@ -533,14 +533,14 @@ def page_order_form(edit_id=None):
         rr=parties.loc[parties.id==pid]
         return rr.iloc[0].party_name if not rr.empty else str(pid)
     default_party=int(existing["party_id"]) if existing else 0
-    top=st.columns([1.2,1,2])
-    od_default=str(existing["order_date"])[:10] if existing else date.today().isoformat()
-    od=top[0].date_input("Order Date *",value=date.fromisoformat(od_default),key=f"ord_date_{edit_id or 'new'}",disabled=bool(edit_id))
-    shown_no=int(existing["order_no"]) if existing else get_order_no()
-    top[1].text_input("Order Number",str(shown_no),disabled=True,key=f"ord_no_{edit_id or 'new'}")
+    top=st.columns([2,1.2,1])
     party_key=f"ord_party_{edit_id or 'new'}"
     if party_key not in st.session_state: st.session_state[party_key]=default_party
-    party_id=top[2].selectbox("Party Name *",pids,index=pids.index(st.session_state[party_key]) if st.session_state[party_key] in pids else 0,format_func=label_party,key=party_key,disabled=bool(edit_id))
+    party_id=top[0].selectbox("Party Name *",pids,index=pids.index(st.session_state[party_key]) if st.session_state[party_key] in pids else 0,format_func=label_party,key=party_key,disabled=bool(edit_id))
+    od_default=str(existing["order_date"])[:10] if existing else date.today().isoformat()
+    od=top[1].date_input("Order Date *",value=date.fromisoformat(od_default),key=f"ord_date_{edit_id or 'new'}",disabled=bool(edit_id))
+    shown_no=int(existing["order_no"]) if existing else get_order_no()
+    top[2].text_input("Order Number",str(shown_no),disabled=True,key=f"ord_no_{edit_id or 'new'}")
     if party_id:
         party=parties.loc[parties.id==party_id].iloc[0]
         info=st.columns(4)
@@ -564,11 +564,15 @@ def page_order_form(edit_id=None):
         opts=sku_options.copy()
         if cur and cur not in opts: opts.insert(1,cur)
         sku=c[1].selectbox("Particulars / SKU",opts,index=opts.index(cur) if cur in opts else 0,key=skey,label_visibility="collapsed")
-        rate_default=float(old.piece_rate) if old is not None else float(skus.loc[skus.sku_number==sku,"sale_rate"].iloc[0]) if not skus.empty and sku in skus.sku_number.tolist() else 0.0
+        # Always derive a new-order row's rate from the currently selected SKU.
+        # For edits, retain the rate already saved on that order.
+        sku_rate = float(skus.loc[skus.sku_number==sku,"sale_rate"].iloc[0]) if not skus.empty and sku in skus.sku_number.tolist() else 0.0
+        rate_default=float(old.piece_rate) if old is not None else sku_rate
         rkey=f"ord_rate_{ix}"
-        if rkey not in st.session_state: st.session_state[rkey]=rate_default
+        if edit_id:
+            if rkey not in st.session_state: st.session_state[rkey]=rate_default
         else:
-            if not edit_id and sku and st.session_state.get(f"ord_last_sku_{ix}")!=sku: st.session_state[rkey]=rate_default
+            st.session_state[rkey]=sku_rate
         st.session_state[f"ord_last_sku_{ix}"]=sku
         sizes={}
         for j,size in enumerate(SIZES):
