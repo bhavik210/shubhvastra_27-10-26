@@ -8,6 +8,7 @@ from sqlalchemy.engine import Engine
 from werkzeug.security import generate_password_hash, check_password_hash
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as PDFImage
@@ -584,7 +585,7 @@ def page_order_form(edit_id=None):
         disc=c[6].number_input("Discount",min_value=0.0,step=1.0,format="%.2f",key=disc_key,label_visibility="collapsed",disabled=bool(edit_id))
         # Rate is fetched from SKU Master and displayed read-only without +/- controls.
         rate=float(st.session_state.get(rkey, rate_default) or 0)
-        c[7].text_input("WSP Rate", value=f"{rate:,.2f}" if rate else "", key=f"ord_rate_display_{ix}_{edit_id or 'new'}", label_visibility="collapsed", disabled=True, placeholder="Auto rate")
+        c[7].text_input("WSP Rate", value=f"{rate:,.2f}", key=f"ord_rate_display_{ix}_{edit_id or 'new'}", label_visibility="collapsed", disabled=True)
         qty=sum(sizes.values())
         c[8].markdown(f"**{qty}**")
         rows.append({"sku":sku,"rate":rate,"discount":disc,"sizes":sizes})
