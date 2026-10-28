@@ -647,10 +647,9 @@ def page_order_form(edit_id=None):
     delivery_default=str(existing.get("delivery_date") or date.today().isoformat())[:10] if existing else date.today().isoformat()
     delivery_date=st.date_input("Delivery Date *", value=date.fromisoformat(delivery_default), key=f"ord_delivery_date_{edit_id or 'new'}", disabled=bool(edit_id))
     narration=st.text_area("Additional Order Details",value=str(existing["narration"] or "") if existing else "",key=f"ord_narration_{edit_id or 'new'}",disabled=bool(edit_id))
-    buttons=st.columns(3)
+    buttons=st.columns(2)
     save=buttons[0].button("Save Order" if not edit_id else "Save Item Changes",type="primary",use_container_width=True)
     clean=buttons[1].button("Clean Form",use_container_width=True)
-    if buttons[2].button("Order List",use_container_width=True): st.session_state["pending_page"]="Orders"; st.rerun()
     if clean:
         st.session_state["confirm_clean_order_form"]=True
     if st.session_state.get("confirm_clean_order_form"):
@@ -715,77 +714,66 @@ def page_order_form(edit_id=None):
 
 def page_orders():
     st.title("Order List")
-    if st.button("＋ Create New Order",type="primary"): st.session_state.pop("edit_order_id",None); st.session_state["pending_page"]="New Order"; st.rerun()
-    search=st.text_input("Search Order Number / Party")
-    df=q("SELECT o.id AS ID,o.order_no AS \"Order Number\",o.order_date AS \"Order Date\",p.party_name AS \"Party Name\",COALESCE(SUM(s.ordered_qty),0) AS Qty,COALESCE(SUM(s.ordered_qty * i.piece_rate),0) AS Amount,COALESCE(a.agent_name,'') AS \"Agent Name\",o.cancelled AS Cancelled FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id LEFT JOIN order_items i ON i.order_id=o.id LEFT JOIN order_item_sizes s ON s.order_item_id=i.id WHERE (:s='' OR CAST(o.order_no AS VARCHAR) LIKE :likeq OR LOWER(p.party_name) LIKE LOWER(:likeq)) GROUP BY o.id,o.order_no,o.order_date,p.party_name,a.agent_name,o.cancelled ORDER BY o.order_no ASC LIMIT 1000",{"s":search,"likeq":f"%{search}%"})
-    st.dataframe(df.drop(columns=["ID"]) if not df.empty else df,use_container_width=True,hide_index=True)
-    if not df.empty:
-        oid=st.selectbox("Select Order to view/edit",df.ID.tolist(),format_func=lambda x:f"#{df.loc[df.ID==x,'Order Number'].iloc[0]} — {df.loc[df.ID==x,'Party Name'].iloc[0]}")
-        c=st.columns(3)
-        if c[0].button("View Order Details",use_container_width=True): st.session_state["selected_order"]=int(oid); st.session_state["pending_page"]="Order Details"; st.rerun()
-        dispatched=bool(one("SELECT id FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id WHERE i.order_id=:id LIMIT 1",{"id":int(oid)}))
-        if c[1].button("Edit Order",disabled=dispatched,use_container_width=True): st.session_state["edit_order_id"]=int(oid); st.session_state["pending_page"]="New Order"; st.rerun()
-        if c[2].button("Cancel / Restore Order",use_container_width=True):
-            old=int(one("SELECT cancelled FROM orders WHERE id=:id",{"id":int(oid)})["cancelled"])
-            run("UPDATE orders SET cancelled=:v WHERE id=:id",{"v":0 if old else 1,"id":int(oid)}); st.success("Order status update થયો."); st.rerun()
-    if not df.empty:
-        st.subheader("Order Actions")
-        order_ids=df.ID.astype(int).tolist()
-        chosen=st.selectbox("Choose Order",order_ids,format_func=lambda x:f"Order #{int(df.loc[df.ID==x, 'Order Number'].iloc[0])} — {df.loc[df.ID==x, 'Party Name'].iloc[0]}",key="orders_action_select")
-        act=st.columns(4)
-        if act[0].button("Edit Order",use_container_width=True):
-            st.session_state["edit_order_id"]=int(chosen); st.session_state["pending_page"]="New Order"; st.rerun()
-        pdfrow=one("SELECT o.*,p.party_name,p.phone_number,p.address,p.city,p.state,p.gst_number,p.transport_details,p.transport_gst_number,COALESCE(a.agent_name,'') agent_name FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id WHERE o.id=:id",{"id":int(chosen)})
-        if pdfrow:
-            pdfrow["packaging"] = ", ".join(json.loads(pdfrow.get("packaging") or "[]")) if str(pdfrow.get("packaging") or "").startswith("[") else str(pdfrow.get("packaging") or "")
-            pdfitems=q("SELECT i.sr_no AS Sr,i.particulars AS Particulars,i.piece_rate AS \"WSP Rate\",i.discount AS Discount,s.size_code AS Size,s.ordered_qty AS Qty,(SELECT COALESCE(SUM(d.qty),0) FROM order_dispatches d WHERE d.order_size_id=s.id) AS Dispatched FROM order_items i JOIN order_item_sizes s ON s.order_item_id=i.id WHERE i.order_id=:id ORDER BY i.sr_no,s.size_code",{"id":int(chosen)})
-            act[1].download_button("Download PDF",order_pdf_bytes(pdfrow,pdfitems),file_name=f"shubhvastra_order_{pdfrow['order_no']}.pdf",mime="application/pdf",use_container_width=True)
-        if str(current_user().get("role", "staff")).lower() in ("admin", "member"):
-            if act[2].button("Delete Order",use_container_width=True): st.session_state["confirm_delete_order_id"]=int(chosen)
-        if str(current_user().get("role", "staff")).lower() in ("admin", "member") and st.session_state.get("confirm_delete_order_id")==int(chosen):
-            st.warning("Delete order માટે authorized delete password નાખો. આ action પાછું ફેરવી શકાતું નથી.")
-            dp=st.text_input("Delete Password",type="password",key="order_delete_password")
-            if st.button("Confirm Delete",type="primary"):
-                if dp != "9414": st.error("Password ખોટો છે.")
-                else:
-                    dispatched=one("SELECT d.id FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id WHERE i.order_id=:id LIMIT 1",{"id":int(chosen)})
-                    if dispatched: st.error("Dispatch થયેલો order delete કરી શકાતો નથી.")
-                    else:
-                        run("DELETE FROM order_items WHERE order_id=:id",{"id":int(chosen)}); run("DELETE FROM orders WHERE id=:id",{"id":int(chosen)})
-                        st.session_state.pop("confirm_delete_order_id",None); st.success("Order delete થયો."); st.rerun()
-    st.subheader("CSV Import / Export")
-    a,b=st.columns(2)
-    with a:
-        sample=pd.DataFrame(columns=["Order Number (optional)","Order Date (YYYY-MM-DD)","Party Name","Particulars","Piece Rate","Discount","M Qty","L Qty","XL Qty","XXL Qty","Narration"])
-        sample.loc[0]=["","2026-10-27","Existing Party","SKU-001",0,0,0,0,0,0,""]
-        df_download(sample,"shubhvastra_order_import_template.csv","Download Order CSV Template")
-        up=st.file_uploader("Order CSV Upload",type=["csv"],key="order_csv")
-        if up and st.button("Import Order CSV",type="primary"):
-            try:
-                rows=list(csv.DictReader(io.StringIO(up.getvalue().decode("utf-8-sig")))); made=0
-                with engine.begin() as conn:
-                    for line,r in enumerate(rows,2):
-                        pname=(r.get("Party Name") or "").strip(); sku=(r.get("Particulars") or "").strip(); od=(r.get("Order Date (YYYY-MM-DD)") or "").strip()
-                        if not pname and not sku: continue
-                        party=conn.execute(text("SELECT id FROM parties WHERE LOWER(party_name)=LOWER(:n) ORDER BY id LIMIT 1"),{"n":pname}).first()
-                        if not party: raise ValueError(f"Row {line}: Party not found: {pname}")
-                        if not sku: raise ValueError(f"Row {line}: Particulars missing")
-                        datetime.strptime(od,"%Y-%m-%d")
-                        nums={s:int(r.get(f"{s} Qty") or 0) for s in SIZES}
-                        if sum(nums.values())<=0: raise ValueError(f"Row {line}: quantity missing")
-                        given=(r.get("Order Number (optional)") or "").strip()
-                        no=int(given) if given else int(conn.execute(text("SELECT COALESCE(MAX(order_no),1100)+1 FROM orders")).scalar_one())
-                        if conn.execute(text("SELECT id FROM orders WHERE order_no=:n"),{"n":no}).first(): raise ValueError(f"Row {line}: duplicate order number {no}")
-                        oid=conn.execute(text("INSERT INTO orders(order_no,order_date,party_id,narration) VALUES(:no,:d,:p,:n) RETURNING id"),{"no":no,"d":od,"p":int(party[0]),"n":r.get("Narration","")}).scalar_one()
-                        iid=conn.execute(text("INSERT INTO order_items(order_id,sr_no,particulars,piece_rate,discount) VALUES(:o,1,:s,:r,:d) RETURNING id"),{"o":oid,"s":sku,"r":float(r.get("Piece Rate") or 0),"d":float(r.get("Discount") or 0)}).scalar_one()
-                        for size,qty in nums.items():
-                            if qty>0: conn.execute(text("INSERT INTO order_item_sizes(order_item_id,size_code,ordered_qty) VALUES(:i,:s,:q)"),{"i":iid,"s":size,"q":qty})
-                        made+=1
-                st.success(f"{made} order import થયા."); st.rerun()
-            except Exception as e: st.error(f"CSV import રદ થયો: {e}")
-    with b:
-        exp=q("SELECT o.order_no AS \"Order Number\",o.order_date AS \"Order Date\",p.party_name AS \"Party Name\",i.particulars AS Particulars,i.piece_rate AS \"Piece Rate\",i.discount AS Discount,s.size_code AS Size,s.ordered_qty AS Qty,o.narration AS Narration FROM orders o JOIN parties p ON p.id=o.party_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id ORDER BY o.order_no")
-        df_download(exp,"shubhvastra_orders_export.csv","Export Orders CSV")
+    search=st.text_input("Search Order Number / Party", key="order_history_search", placeholder="Type order number or party name…")
+    # Streamlit reruns on each text change, so the results filter immediately without Enter.
+    df=q("""SELECT o.id AS ID,o.order_no AS "Order Number",o.order_date AS "Order Date",
+             p.party_name AS "Party Name",COALESCE(SUM(s.ordered_qty),0) AS Qty,
+             COALESCE(SUM(s.ordered_qty * i.piece_rate),0) AS Amount,
+             COALESCE(a.agent_name,'') AS "Agent Name",o.cancelled AS Cancelled
+             FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id
+             LEFT JOIN order_items i ON i.order_id=o.id LEFT JOIN order_item_sizes s ON s.order_item_id=i.id
+             WHERE (:s='' OR CAST(o.order_no AS VARCHAR) LIKE :likeq OR LOWER(p.party_name) LIKE LOWER(:likeq))
+             GROUP BY o.id,o.order_no,o.order_date,p.party_name,a.agent_name,o.cancelled
+             ORDER BY o.order_no DESC LIMIT 1000""",{"s":search.strip(),"likeq":f"%{search.strip()}%"})
+    if df.empty:
+        st.info("કોઈ Order મળ્યો નથી." if search.strip() else "હજુ કોઈ Order નથી.")
+        return
+    st.caption(f"કુલ {len(df)} orders")
+    h=st.columns([1.0,1.1,1.8,.65,1.0,1.25,.75,.95,.85])
+    for c, label in zip(h,["Order No.","Order Date","Party Name","Qty","Amount","Agent Name","Edit","PDF","Delete"]):
+        c.markdown(f"**{label}**")
+    # Compact row layout with the requested fields and actions on the same row.
+    for _, row in df.iterrows():
+        oid=int(row["ID"])
+        with st.container(border=True):
+            cols=st.columns([1.0,1.1,1.8,.65,1.0,1.25,.75,.95,.85])
+            cols[0].markdown(f"**#{int(row['Order Number'])}**")
+            cols[1].write(str(row["Order Date"])[:10])
+            cols[2].write(str(row["Party Name"]))
+            cols[3].write(int(row["Qty"]))
+            cols[4].write(f"₹{float(row['Amount'] or 0):,.2f}")
+            cols[5].write(str(row["Agent Name"] or "—"))
+            if str(current_user().get("role", "staff")).lower() in ("admin", "member"):
+                if cols[6].button("Edit",key=f"history_edit_{oid}",use_container_width=True):
+                    st.session_state["edit_order_id"]=oid; st.session_state["pending_page"]="New Order"; st.rerun()
+            else:
+                cols[6].write("—")
+            pdfrow=one("SELECT o.*,p.party_name,p.phone_number,p.address,p.city,p.state,p.gst_number,p.transport_details,p.transport_gst_number,COALESCE(a.agent_name,'') agent_name FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id WHERE o.id=:id",{"id":oid})
+            if pdfrow:
+                pdfrow["packaging"] = ", ".join(json.loads(pdfrow.get("packaging") or "[]")) if str(pdfrow.get("packaging") or "").startswith("[") else str(pdfrow.get("packaging") or "")
+                pdfitems=q('SELECT i.sr_no AS Sr,i.particulars AS Particulars,i.piece_rate AS "WSP Rate",i.discount AS Discount,s.size_code AS Size,s.ordered_qty AS Qty,(SELECT COALESCE(SUM(d.qty),0) FROM order_dispatches d WHERE d.order_size_id=s.id) AS Dispatched FROM order_items i JOIN order_item_sizes s ON s.order_item_id=i.id WHERE i.order_id=:id ORDER BY i.sr_no,s.size_code',{"id":oid})
+                cols[7].download_button("PDF",order_pdf_bytes(pdfrow,pdfitems),file_name=f"shubhvastra_order_{pdfrow['order_no']}.pdf",mime="application/pdf",key=f"history_pdf_{oid}",use_container_width=True)
+            if is_admin():
+                if cols[8].button("Delete",key=f"history_delete_{oid}",use_container_width=True):
+                    st.session_state["confirm_delete_order_id"]=oid
+            else:
+                cols[8].write("")
+    # Delete is intentionally restricted to Admin; members and staff do not see this control.
+    del_id=st.session_state.get("confirm_delete_order_id")
+    if is_admin() and del_id and not df.empty and del_id in df.ID.astype(int).tolist():
+        target=df.loc[df.ID.astype(int)==int(del_id)].iloc[0]
+        st.warning(f"Order #{int(target['Order Number'])} delete કરવો છે? આ action પાછું ફેરવી શકાતું નથી.")
+        yes,no=st.columns(2)
+        if yes.button("Confirm Delete",type="primary",key="history_confirm_delete"):
+            dispatched=one("SELECT d.id FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id WHERE i.order_id=:id LIMIT 1",{"id":int(del_id)})
+            if dispatched:
+                st.error("Dispatch record ધરાવતો order delete કરી શકાતો નથી.")
+            else:
+                run("DELETE FROM order_items WHERE order_id=:id",{"id":int(del_id)})
+                run("DELETE FROM orders WHERE id=:id",{"id":int(del_id)})
+                st.session_state.pop("confirm_delete_order_id",None); st.success("Order delete થયો."); st.rerun()
+        if no.button("Cancel",key="history_cancel_delete"):
+            st.session_state.pop("confirm_delete_order_id",None); st.rerun()
 
 
 def page_order_details():
@@ -1091,11 +1079,11 @@ if not require_login():
 user=current_user()
 role_name = str(user.get("role", "staff")).lower()
 if role_name == "admin":
-    menu=["Dashboard","Party Master","Agent Master","Item Master","New Order","Orders","Order Details","Pending to Dispatched","Order Reports","Utilities / Admin Panel"]
+    menu=["Dashboard","Party Master","Agent Master","Item Master","New Order","Order History","Pending to Dispatched","Order Reports","Utilities / Admin Panel"]
 elif role_name == "member":
-    menu=["Dashboard","Party Master","Agent Master","Item Master","New Order","Orders","Order Details","Pending to Dispatched","Order Reports"]
+    menu=["Dashboard","Party Master","Agent Master","Item Master","New Order","Order History","Pending to Dispatched","Order Reports"]
 else:
-    menu=["Dashboard","Orders","Order Details","Pending to Dispatched","Order Reports"]
+    menu=["Dashboard","Order History","Pending to Dispatched","Order Reports"]
 with st.sidebar:
     logo=BASE/"static"/"shubhvastra_logo.png"
     if logo.exists(): st.image(str(logo),width=125)
@@ -1109,6 +1097,8 @@ with st.sidebar:
     default=st.session_state.get("page","Dashboard")
     if default not in menu: default="Dashboard"
     page=st.radio("Navigation",menu,index=menu.index(default),key="main_navigation")
+    if page == "Order History":
+        st.selectbox("Order History", ["Order List"], key="order_history_submenu")
     st.session_state["page"]=page
 if page=="Dashboard": page_dashboard()
 elif page=="Party Master": page_parties()
@@ -1117,8 +1107,7 @@ elif page=="Item Master": page_sku()
 elif page=="New Order":
     if str(user.get("role", "staff")).lower() == "staff": st.error("આ વિભાગ માટે પરવાનગી નથી.")
     else: page_order_form(st.session_state.get("edit_order_id"))
-elif page=="Orders": page_orders()
-elif page=="Order Details": page_order_details()
+elif page=="Order History": page_orders()
 elif page=="Pending to Dispatched": page_dispatch()
 elif page=="Order Reports": page_reports()
 elif page=="Utilities / Admin Panel" and is_admin(): page_settings()
