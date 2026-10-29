@@ -121,7 +121,7 @@ def init_db():
       f"CREATE TABLE IF NOT EXISTS order_dispatches (id {identity}, order_size_id INTEGER NOT NULL REFERENCES order_item_sizes(id) ON DELETE RESTRICT, dispatched_size VARCHAR(10) NOT NULL, qty INTEGER NOT NULL CHECK(qty > 0), dispatch_date DATE NOT NULL, details TEXT NOT NULL DEFAULT '', invoice_number VARCHAR(150) NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
       f"CREATE TABLE IF NOT EXISTS order_size_cancellations (id {identity}, order_size_id INTEGER NOT NULL REFERENCES order_item_sizes(id) ON DELETE CASCADE, qty INTEGER NOT NULL CHECK(qty > 0), details TEXT NOT NULL DEFAULT '', cancelled_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
       f"CREATE TABLE IF NOT EXISTS sku_master (id {identity}, sku_number VARCHAR(250) NOT NULL UNIQUE, sale_rate NUMERIC(12,2) NOT NULL CHECK(sale_rate >= 0), created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-      f"CREATE TABLE IF NOT EXISTS users (id {identity}, username VARCHAR(100) NOT NULL UNIQUE, password_hash TEXT NOT NULL, role VARCHAR(20) NOT NULL DEFAULT 'staff', active INTEGER NOT NULL DEFAULT 1, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+      f"CREATE TABLE IF NOT EXISTS users (id {identity}, username VARCHAR(100) NOT NULL UNIQUE, password_hash TEXT NOT NULL, role VARCHAR(20) NOT NULL DEFAULT 'staff', active INTEGER NOT NULL DEFAULT 1, agent_id INTEGER NULL REFERENCES agents(id) ON DELETE RESTRICT, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     ]
     with engine.begin() as conn:
         for stmt in stmts: conn.execute(text(stmt))
@@ -132,12 +132,16 @@ def init_db():
             conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_date DATE NULL"))
             conn.execute(text("ALTER TABLE order_item_sizes ADD COLUMN IF NOT EXISTS cancelled INTEGER NOT NULL DEFAULT 0"))
             conn.execute(text("ALTER TABLE order_dispatches ADD COLUMN IF NOT EXISTS invoice_number VARCHAR(150) NOT NULL DEFAULT ''"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS agent_id INTEGER NULL REFERENCES agents(id) ON DELETE RESTRICT"))
         else:
             cols = {r[1] for r in conn.execute(text("PRAGMA table_info(orders)")).fetchall()}
             if "gst_type" not in cols:
                 conn.execute(text("ALTER TABLE orders ADD COLUMN gst_type VARCHAR(30) NOT NULL DEFAULT ''"))
             if "delivery_date" not in cols:
                 conn.execute(text("ALTER TABLE orders ADD COLUMN delivery_date DATE NULL"))
+            user_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(users)")).fetchall()}
+            if "agent_id" not in user_cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN agent_id INTEGER NULL REFERENCES agents(id) ON DELETE RESTRICT"))
         # User accounts are created through first-run setup / Admin Panel.
         # Backfill SKU master from historic order items without changing saved order rates.
         conn.execute(text("""INSERT INTO sku_master(sku_number,sale_rate)
@@ -243,9 +247,9 @@ def show_login():
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
     if submitted:
-        user = one("SELECT id,username,password_hash,role,active FROM users WHERE LOWER(username)=LOWER(:u)", {"u":username.strip()})
+        user = one("SELECT id,username,password_hash,role,active,agent_id FROM users WHERE LOWER(username)=LOWER(:u)", {"u":username.strip()})
         if user and int(user["active"]) == 1 and check_password_hash(user["password_hash"], password):
-            st.session_state["authenticated_user"] = {"id":int(user["id"]),"username":user["username"],"role":user["role"]}
+            st.session_state["authenticated_user"] = {"id":int(user["id"]),"username":user["username"],"role":user["role"],"agent_id":(int(user["agent_id"]) if user.get("agent_id") is not None else None)}
             st.rerun()
         else:
             st.error("Username અથવા password ખોટો છે, અથવા user disabled છે.")
@@ -372,12 +376,68 @@ def login_screen():
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
     if submitted:
-        user = one("SELECT id,username,password_hash,role,active FROM users WHERE LOWER(username)=LOWER(:u)", {"u":username.strip()})
+        user = one("SELECT id,username,password_hash,role,active,agent_id FROM users WHERE LOWER(username)=LOWER(:u)", {"u":username.strip()})
         if user and int(user["active"]) == 1 and check_password_hash(user["password_hash"], password):
-            st.session_state["user"] = {"id":int(user["id"]),"username":user["username"],"role":user["role"]}
+            st.session_state["user"] = {"id":int(user["id"]),"username":user["username"],"role":user["role"],"agent_id":(int(user["agent_id"]) if user.get("agent_id") is not None else None)}
             st.rerun()
         else: st.error("Username અથવા password ખોટો છે.")
     st.markdown("</div>", unsafe_allow_html=True)
+
+
+
+def page_agent_portal(view="dashboard"):
+    """Read-only portal scoped strictly to the logged-in agent's assigned parties."""
+    user = current_user() or {}
+    aid = user.get("agent_id")
+    agent = one("SELECT id, agent_name FROM agents WHERE id=:id", {"id": int(aid)}) if aid is not None else None
+    if not agent:
+        st.error("આ Agent user સાથે Agent Master mapping મળતું નથી. Admin ને mapping સુધારવા કહો.")
+        return
+    aid = int(agent["id"])
+    agent_name = str(agent["agent_name"])
+    if view == "dashboard":
+        st.title(f"Agent Dashboard — {agent_name}")
+        parties = q("SELECT p.id,p.party_name AS \"Party Name\",p.phone_number AS \"Phone Number\",p.city AS City,p.state AS State,p.address AS Address FROM parties p WHERE p.agent_id=:aid ORDER BY p.party_name", {"aid": aid})
+        summary = one("""SELECT COUNT(DISTINCT p.id) AS parties,
+            COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM orders o JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id WHERE o.party_id=p.id AND o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty > COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0) + COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0)) THEN p.id END) AS pending_parties
+            FROM parties p WHERE p.agent_id=:aid""", {"aid": aid})
+        pending = one("""SELECT COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(CASE WHEN o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty-COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)-COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0)>0 THEN s.ordered_qty-COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)-COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0) ELSE 0 END),0) AS qty
+            FROM orders o JOIN parties p ON p.id=o.party_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id WHERE p.agent_id=:aid AND o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty > COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)+COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0)""", {"aid": aid})
+        dispatched = one("""SELECT COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(d.qty),0) AS qty FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id JOIN orders o ON o.id=i.order_id JOIN parties p ON p.id=o.party_id WHERE p.agent_id=:aid""", {"aid": aid})
+        cancelled = one("""SELECT COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(c.qty),0) AS qty FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN order_items i ON i.order_id=o.id LEFT JOIN order_item_sizes s ON s.order_item_id=i.id LEFT JOIN order_size_cancellations c ON c.order_size_id=s.id WHERE p.agent_id=:aid AND (o.cancelled=1 OR s.cancelled=1 OR c.id IS NOT NULL)""", {"aid": aid})
+        cols=st.columns(5)
+        metrics=[("Total Parties",summary.get("parties",0)),("Pending Orders",pending.get("orders",0)),("Pending Pieces",pending.get("qty",0)),("Dispatched Orders",dispatched.get("orders",0)),("Cancelled Orders",cancelled.get("orders",0))]
+        for col,(label,value) in zip(cols,metrics):
+            with col: st.markdown(f"<div class='metric-card'><div class='metric-label'>{label}</div><div class='metric-value'>{int(value or 0)}</div></div>", unsafe_allow_html=True)
+        st.subheader("My Parties")
+        st.caption("આ list ફક્ત તમારા Agent account સાથે જોડાયેલી Parties ની છે. આ પેજ read-only છે.")
+        if parties.empty: st.info("આ Agent સાથે કોઈ Party જોડાયેલી નથી.")
+        else: st.dataframe(parties.drop(columns=["id"]), use_container_width=True, hide_index=True)
+        return
+    if view == "pending":
+        st.title(f"My Pending Orders — {agent_name}")
+        df=q("""SELECT p.party_name AS \"Party Name\",o.order_no AS \"Order No.\",o.order_date AS \"Order Date\",i.particulars AS \"SKU Code\",s.size_code AS Size,s.ordered_qty AS \"Order Qty\",COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0) AS Dispatched,COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0) AS Cancelled FROM orders o JOIN parties p ON p.id=o.party_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id WHERE p.agent_id=:aid AND o.cancelled=0 AND s.cancelled=0 ORDER BY o.order_no DESC,p.party_name,i.particulars,s.size_code""", {"aid":aid})
+        if not df.empty: df["Pending Qty"]=(df["Order Qty"].astype(int)-df["Dispatched"].astype(int)-df["Cancelled"].astype(int)).clip(lower=0); df=df[df["Pending Qty"]>0].drop(columns=["Dispatched","Cancelled"])
+        for c in ("Order Date",):
+            if not df.empty: df[c]=pd.to_datetime(df[c],errors="coerce").dt.strftime("%d-%m-%Y").fillna("")
+        filename="shubhvastra_agent_pending_orders.pdf"
+        title="My Pending Orders"
+    elif view == "dispatched":
+        st.title(f"My Dispatched Orders — {agent_name}")
+        df=q("""SELECT p.party_name AS \"Party Name\",o.order_no AS \"Order No.\",o.order_date AS \"Order Date\",d.dispatch_date AS \"Dispatch Date\",i.particulars AS \"SKU Code\",d.dispatched_size AS Size,d.qty AS \"Dispatched Qty\",d.invoice_number AS \"Invoice No.\",d.details AS Details FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id JOIN orders o ON o.id=i.order_id JOIN parties p ON p.id=o.party_id WHERE p.agent_id=:aid ORDER BY d.dispatch_date DESC,o.order_no DESC,p.party_name""", {"aid":aid})
+        filename="shubhvastra_agent_dispatched_orders.pdf"; title="My Dispatched Orders"
+        for c in ("Order Date","Dispatch Date"):
+            if not df.empty: df[c]=pd.to_datetime(df[c],errors="coerce").dt.strftime("%d-%m-%Y").fillna("")
+    else:
+        st.title(f"My Cancelled Orders — {agent_name}")
+        df=q("""SELECT DISTINCT p.party_name AS \"Party Name\",o.order_no AS \"Order No.\",o.order_date AS \"Order Date\",i.particulars AS \"SKU Code\",s.size_code AS Size,s.ordered_qty AS \"Order Qty\",CASE WHEN o.cancelled=1 THEN 'Order Cancelled' WHEN s.cancelled=1 THEN 'Size Cancelled' ELSE 'Piece Cancelled' END AS \"Cancel Status\",COALESCE(c.qty,0) AS \"Cancelled Qty\",COALESCE(c.details,'') AS Details FROM orders o JOIN parties p ON p.id=o.party_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id LEFT JOIN order_size_cancellations c ON c.order_size_id=s.id WHERE p.agent_id=:aid AND (o.cancelled=1 OR s.cancelled=1 OR c.id IS NOT NULL) ORDER BY o.order_no DESC,p.party_name""", {"aid":aid})
+        filename="shubhvastra_agent_cancelled_orders.pdf"; title="My Cancelled Orders"
+        if not df.empty: df["Order Date"]=pd.to_datetime(df["Order Date"],errors="coerce").dt.strftime("%d-%m-%Y").fillna("")
+    if df.empty:
+        st.info("આ Agent માટે આ પ્રકારના records મળ્યા નથી.")
+    else:
+        st.dataframe(df,use_container_width=True,hide_index=True)
+        st.download_button("Download PDF",pending_report_pdf_bytes(title,df),file_name=filename,mime="application/pdf",key=f"agent_portal_{view}_pdf",use_container_width=True)
 
 
 def page_dashboard():
@@ -1084,51 +1144,87 @@ def page_users():
         st.error("આ વિભાગ ફક્ત Main Admin માટે છે.")
         return
     st.title("Admin Panel / User Access")
-    st.caption("અહીંથી login username/password, role અને user access નિયંત્રિત કરો. Login screen પર Forgot Password નથી.")
+    st.caption("Agent user ફક્ત તેની સાથે જોડાયેલી Parties અને તેમના pending, dispatched તથા cancelled reports જોઈ શકશે. Agent કોઈ record edit કરી શકશે નહીં.")
+    agent_df = q("SELECT id, agent_name FROM agents ORDER BY agent_name")
+    agent_ids = agent_df["id"].astype(int).tolist() if not agent_df.empty else []
+    agent_names = agent_df["agent_name"].astype(str).tolist() if not agent_df.empty else []
     with st.expander("Create New User", expanded=True):
         with st.form("new_user"):
-            c=st.columns(3)
-            username=c[0].text_input("Username", key="create_username")
-            password=c[1].text_input("Password (minimum 10 characters)",type="password",key="create_password")
-            role=c[2].selectbox("Role",["admin","member","staff"],format_func=lambda x:x.title(),key="create_role")
-            if st.form_submit_button("Create User",type="primary"):
-                if not username.strip() or len(password)<10:
+            role = st.selectbox("Role", ["admin", "member", "staff", "agent"], format_func=lambda x: x.title(), key="create_role")
+            agent_id = None
+            if role == "agent":
+                if not agent_ids:
+                    st.warning("Agent role user બનાવવા પહેલાં Agent Master માં Agent ઉમેરો.")
+                selected_agent = st.selectbox("Select Agent", agent_ids, format_func=lambda x: agent_df.loc[agent_df.id.astype(int)==x, "agent_name"].iloc[0], key="create_agent_id") if agent_ids else None
+                agent_id = int(selected_agent) if selected_agent is not None else None
+                username = st.text_input("Username (Agent Name)", value=(agent_df.loc[agent_df.id.astype(int)==agent_id, "agent_name"].iloc[0] if agent_id is not None else ""), disabled=True, key="create_agent_username")
+            else:
+                username = st.text_input("Username", key="create_username")
+            password = st.text_input("Password (minimum 10 characters)", type="password", key="create_password")
+            if st.form_submit_button("Create User", type="primary"):
+                if role == "agent" and agent_id is None:
+                    st.error("Agent પસંદ કરો.")
+                elif not username.strip() or len(password) < 10:
                     st.error("Username અને ઓછામાં ઓછો 10-character password જરૂરી છે.")
-                elif one("SELECT id FROM users WHERE LOWER(username)=LOWER(:u)",{"u":username.strip()}):
-                    st.error("આ username પહેલેથી છે.")
+                elif one("SELECT id FROM users WHERE LOWER(username)=LOWER(:u)", {"u":username.strip()}):
+                    st.error("આ username પહેલેથી છે. આ Agent માટે બીજું account હોય તો પહેલું account બદલો.")
+                elif role == "agent" and one("SELECT id FROM users WHERE role='agent' AND agent_id=:aid AND active=1", {"aid":agent_id}):
+                    st.error("આ Agent માટે પહેલેથી active login user છે.")
                 else:
-                    run("INSERT INTO users(username,password_hash,role,active) VALUES(:u,:p,:r,1)",{"u":username.strip(),"p":generate_password_hash(password),"r":role})
+                    run("INSERT INTO users(username,password_hash,role,active,agent_id) VALUES(:u,:p,:r,1,:aid)", {"u":username.strip(), "p":generate_password_hash(password), "r":role, "aid":agent_id})
                     st.success("User create થયો.")
                     st.rerun()
     df=q('SELECT id AS ID,username AS Username,role AS Role,active AS Active,created_at AS "Created At" FROM users ORDER BY username')
     st.subheader("Existing Users")
-    st.dataframe(df.drop(columns=["ID"], errors="ignore"),use_container_width=True,hide_index=True)
+    if not df.empty:
+        view_df=df.copy()
+        agent_map={int(r.id):str(r.agent_name) for r in agent_df.itertuples()} if not agent_df.empty else {}
+        details=q("SELECT id,agent_id FROM users")
+        detail_map={int(r.id):agent_map.get(int(r.agent_id), "") for r in details.itertuples() if pd.notna(r.agent_id)}
+        view_df["Agent"] = view_df["ID"].map(detail_map).fillna("")
+    else:
+        view_df=df
+    st.dataframe(view_df.drop(columns=["ID"], errors="ignore"),use_container_width=True,hide_index=True)
     if not df.empty:
         uid=st.selectbox("Select User",df.ID.tolist(),format_func=lambda x:df.loc[df.ID==x,"Username"].iloc[0],key="admin_selected_user")
-        selected=one("SELECT id,username,role,active FROM users WHERE id=:id",{"id":int(uid)})
+        selected=one("SELECT id,username,role,active,agent_id FROM users WHERE id=:id",{"id":int(uid)})
         with st.form("edit_user_credentials"):
             st.write(f"Selected user: **{selected['username']}**")
-            new_username=st.text_input("Change Username",value=selected["username"])
+            new_role=st.selectbox("Role",["staff","member","admin","agent"],index=["staff","member","admin","agent"].index(selected["role"]) if selected["role"] in ["staff","member","admin","agent"] else 0)
+            new_agent_id = None
+            if new_role == "agent":
+                if agent_ids:
+                    current_index=agent_ids.index(int(selected["agent_id"])) if selected.get("agent_id") is not None and int(selected["agent_id"]) in agent_ids else 0
+                    new_agent_id=st.selectbox("Select Agent",agent_ids,index=current_index,format_func=lambda x:agent_df.loc[agent_df.id.astype(int)==x,"agent_name"].iloc[0],key="edit_agent_id")
+                    new_username=str(agent_df.loc[agent_df.id.astype(int)==int(new_agent_id),"agent_name"].iloc[0])
+                    st.text_input("Username (Agent Name)",value=new_username,disabled=True)
+                else:
+                    st.warning("Agent Master માં કોઈ Agent નથી.")
+                    new_username=selected["username"]
+            else:
+                new_username=st.text_input("Change Username",value=selected["username"])
             new_password=st.text_input("Set New Password (leave blank to keep current)",type="password")
-            new_role=st.selectbox("Role",["staff","admin"],index=0 if selected["role"]=="staff" else 1)
             active=st.checkbox("User can login",value=bool(selected["active"]))
             save=st.form_submit_button("Save User Settings",type="primary")
         if save:
             if not new_username.strip():
                 st.error("Username ખાલી ન રાખો.")
+            elif new_role == "agent" and new_agent_id is None:
+                st.error("Agent પસંદ કરો.")
             elif len(new_password)>0 and len(new_password)<10:
                 st.error("નવો password ઓછામાં ઓછો 10 characters નો હોવો જોઈએ.")
             elif one("SELECT id FROM users WHERE LOWER(username)=LOWER(:u) AND id<>:id",{"u":new_username.strip(),"id":int(uid)}):
                 st.error("આ username બીજા user દ્વારા વપરાય છે.")
+            elif new_role == "agent" and one("SELECT id FROM users WHERE role='agent' AND agent_id=:aid AND id<>:id AND active=1",{"aid":int(new_agent_id),"id":int(uid)}):
+                st.error("આ Agent માટે બીજું active account પહેલેથી છે.")
             elif int(uid)==int(current_user()["id"]) and not active:
                 st.error("તમારા પોતાના logged-in admin account ને disable કરી શકતા નથી.")
             else:
-                params={"u":new_username.strip(),"r":new_role,"a":1 if active else 0,"id":int(uid)}
-                run("UPDATE users SET username=:u,role=:r,active=:a WHERE id=:id",params)
+                run("UPDATE users SET username=:u,role=:r,active=:a,agent_id=:aid WHERE id=:id",{"u":new_username.strip(),"r":new_role,"a":1 if active else 0,"aid":int(new_agent_id) if new_role=="agent" and new_agent_id is not None else None,"id":int(uid)})
                 if new_password:
                     run("UPDATE users SET password_hash=:p WHERE id=:id",{"p":generate_password_hash(new_password),"id":int(uid)})
                 if int(uid)==int(current_user()["id"]):
-                    st.session_state["authenticated_user"].update({"username":new_username.strip(),"role":new_role})
+                    st.session_state["authenticated_user"].update({"username":new_username.strip(),"role":new_role,"agent_id":int(new_agent_id) if new_role=="agent" and new_agent_id is not None else None})
                 st.success("User settings update થઈ.")
                 st.rerun()
 
@@ -1300,6 +1396,8 @@ if role_name == "admin":
     menu=["Dashboard","Party Master","Agent Master","New Order","Pending to Dispatched","Dispatched Details","Order Reports","Utilities"]
 elif role_name == "member":
     menu=["Dashboard","Party Master","Agent Master","New Order","Pending to Dispatched","Dispatched Details","Order Reports","Utilities"]
+elif role_name == "agent":
+    menu=["My Dashboard","My Pending Orders","My Dispatched Orders","My Cancelled Orders"]
 else:
     menu=["Dashboard","Pending to Dispatched","Dispatched Details","Order Reports","Utilities"]
 with st.sidebar:
@@ -1334,7 +1432,12 @@ with st.sidebar:
         util_choice = ""
         dispatched_choice = ""
     st.session_state["page"]=page
-if page=="Dashboard": page_dashboard()
+if role_name == "agent":
+    if page == "My Dashboard": page_agent_portal("dashboard")
+    elif page == "My Pending Orders": page_agent_portal("pending")
+    elif page == "My Dispatched Orders": page_agent_portal("dispatched")
+    elif page == "My Cancelled Orders": page_agent_portal("cancelled")
+elif page=="Dashboard": page_dashboard()
 elif page=="Party Master": page_parties()
 elif page=="Agent Master": page_agents()
 elif page=="New Order":
