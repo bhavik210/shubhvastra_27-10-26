@@ -119,6 +119,7 @@ def init_db():
       f"CREATE TABLE IF NOT EXISTS order_items (id {identity}, order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE, sr_no INTEGER NOT NULL, particulars VARCHAR(250) NOT NULL, piece_rate NUMERIC(12,2) NOT NULL DEFAULT 0, discount NUMERIC(12,2) NOT NULL DEFAULT 0)",
       f"CREATE TABLE IF NOT EXISTS order_item_sizes (id {identity}, order_item_id INTEGER NOT NULL REFERENCES order_items(id) ON DELETE CASCADE, size_code VARCHAR(10) NOT NULL, ordered_qty INTEGER NOT NULL CHECK(ordered_qty > 0), cancelled INTEGER NOT NULL DEFAULT 0, UNIQUE(order_item_id,size_code))",
       f"CREATE TABLE IF NOT EXISTS order_dispatches (id {identity}, order_size_id INTEGER NOT NULL REFERENCES order_item_sizes(id) ON DELETE RESTRICT, dispatched_size VARCHAR(10) NOT NULL, qty INTEGER NOT NULL CHECK(qty > 0), dispatch_date DATE NOT NULL, details TEXT NOT NULL DEFAULT '', invoice_number VARCHAR(150) NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+      f"CREATE TABLE IF NOT EXISTS order_size_cancellations (id {identity}, order_size_id INTEGER NOT NULL REFERENCES order_item_sizes(id) ON DELETE CASCADE, qty INTEGER NOT NULL CHECK(qty > 0), details TEXT NOT NULL DEFAULT '', cancelled_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
       f"CREATE TABLE IF NOT EXISTS sku_master (id {identity}, sku_number VARCHAR(250) NOT NULL UNIQUE, sale_rate NUMERIC(12,2) NOT NULL CHECK(sale_rate >= 0), created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
       f"CREATE TABLE IF NOT EXISTS users (id {identity}, username VARCHAR(100) NOT NULL UNIQUE, password_hash TEXT NOT NULL, role VARCHAR(20) NOT NULL DEFAULT 'staff', active INTEGER NOT NULL DEFAULT 1, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     ]
@@ -386,7 +387,7 @@ def page_dashboard():
       ("Total Agents", "SELECT COUNT(*) n FROM agents"),
       ("Total SKU", "SELECT COUNT(*) n FROM sku_master"),
       ("Total Orders", "SELECT COUNT(*) n FROM orders"),
-      ("Pending Orders", "SELECT COUNT(DISTINCT o.id) n FROM orders o JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id WHERE o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty>(SELECT COALESCE(SUM(d.qty),0) FROM order_dispatches d WHERE d.order_size_id=s.id)")]
+      ("Pending Orders", "SELECT COUNT(DISTINCT o.id) n FROM orders o JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id WHERE o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty>(SELECT COALESCE(SUM(d.qty),0) FROM order_dispatches d WHERE d.order_size_id=s.id)+(SELECT COALESCE(SUM(c.qty),0) FROM order_size_cancellations c WHERE c.order_size_id=s.id)")]
     cols=st.columns(5)
     for col,(label,sql) in zip(cols,stats):
         val=one(sql)["n"]
@@ -824,103 +825,170 @@ def pending_report_pdf_bytes(title, df):
     return buff.getvalue()
 
 
-def _pending_order_rows():
-    raw=q("""SELECT p.party_name AS \"Party Name\",COALESCE(a.agent_name,'—') AS \"Agent Name\",o.order_no AS \"Order No.\",o.order_date AS \"Order Date\",i.particulars AS \"SKU Code\",s.size_code AS Size,s.ordered_qty AS \"Order Qty\",COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0) AS Dispatched,i.piece_rate AS Rate,o.narration AS Details
-      FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id
-      WHERE o.cancelled=0 AND s.cancelled=0
-      ORDER BY p.party_name,a.agent_name,o.order_no DESC,i.sr_no,s.size_code""")
-    if raw.empty:
-        return pd.DataFrame(columns=['Party Name','Agent Name','Order No.','Order Date','SKU Code','M','L','XL','XXL','Total Pending Qty','Rate','Details'])
-    raw['Pending']= (pd.to_numeric(raw['Order Qty'],errors='coerce').fillna(0)-pd.to_numeric(raw['Dispatched'],errors='coerce').fillna(0)).clip(lower=0)
-    raw=raw[raw['Pending']>0].copy()
-    if raw.empty:
-        return pd.DataFrame(columns=['Party Name','Agent Name','Order No.','Order Date','SKU Code','M','L','XL','XXL','Total Pending Qty','Rate','Details'])
-    raw['Size']=raw['Size'].astype(str).str.upper().str.strip().str.extract(r'^(XXL|XL|L|M)\b', expand=False).fillna('OTHER')
-    idx=['Party Name','Agent Name','Order No.','Order Date','SKU Code','Rate','Details']
-    pivot=raw.pivot_table(index=idx,columns='Size',values='Pending',aggfunc='sum',fill_value=0).reset_index()
-    pivot.columns.name=None
-    for z in ['M','L','XL','XXL']:
-        if z not in pivot.columns: pivot[z]=0
-    pivot['Total Pending Qty']=pivot[['M','L','XL','XXL']].sum(axis=1)
-    # Keep non-standard sizes visible instead of dropping them from the report.
-    other=raw[raw['Size']=='OTHER'].groupby(idx)['Pending'].sum().reset_index(name='Other Size Qty')
-    if not other.empty:
-        pivot=pivot.merge(other,on=idx,how='left')
-        pivot['Total Pending Qty']=pivot['Total Pending Qty']+pivot['Other Size Qty'].fillna(0)
-        pivot['Details']=pivot['Details'].fillna('').astype(str)+pivot['Other Size Qty'].apply(lambda x: f' | Other size qty: {int(x)}' if pd.notna(x) and x else '')
-        pivot=pivot.drop(columns=['Other Size Qty'])
-    for z in ['M','L','XL','XXL','Total Pending Qty']:
-        pivot[z]=pd.to_numeric(pivot[z],errors='coerce').fillna(0).astype(int)
-    return pivot[['Party Name','Agent Name','Order No.','Order Date','SKU Code','M','L','XL','XXL','Total Pending Qty','Rate','Details']].sort_values(['Party Name','Order No.'],ascending=[True,False]).reset_index(drop=True)
+def _pending_raw():
+    df=q("""SELECT p.party_name AS "Party Name",COALESCE(a.agent_name,'—') AS "Agent Name",
+      o.order_no AS "Order No.",o.order_date AS "Order Date",i.particulars AS "SKU Code",
+      s.size_code AS "Size",s.ordered_qty AS "Order Qty",i.piece_rate AS Rate,
+      i.discount AS "Discount",o.narration AS Details,
+      COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0) AS Dispatched,
+      COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0) AS "Cancelled Qty"
+      FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id
+      JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id
+      WHERE o.cancelled=0 AND s.cancelled=0 ORDER BY p.party_name,o.order_no DESC,i.sr_no,s.size_code""")
+    if not df.empty:
+        for col in ('Order Qty','Dispatched','Cancelled Qty','Rate','Discount'):
+            df[col]=pd.to_numeric(df[col],errors='coerce').fillna(0)
+        df['Pending']=(df['Order Qty']-df['Dispatched']-df['Cancelled Qty']).clip(lower=0).astype(int)
+        df=df[df['Pending']>0].copy()
+    return df
 
 
-def _pending_view(df):
-    return df.rename(columns={'M':'M','L':'L','XL':'XL','XXL':'XXL'}).copy()
+def _pending_report_rows(raw, show_party=False):
+    columns=(['Party Name'] if show_party else [])+['Order No.','Order Date','SKU Code','M','L','XL','XXL','Qty','Discount','Amount','Details']
+    if raw.empty: return pd.DataFrame(columns=columns)
+    work=raw.copy()
+    work['Size']=work['Size'].astype(str).str.upper().str.strip()
+    work['Amount']=((work['Rate']*work['Pending'])*(1-work['Discount']/100)).round(2)
+    work['Order Date']=pd.to_datetime(work['Order Date'],errors='coerce').dt.strftime('%d-%m-%Y').fillna('')
+    idx=['Party Name','Order No.','Order Date','SKU Code','Discount','Details']
+    grouped=work.groupby(idx,dropna=False,sort=False)
+    rows=[]
+    for key,g in grouped:
+        row=dict(zip(idx,key))
+        for sz in ('M','L','XL','XXL'):
+            row[sz]=int(g.loc[g['Size']==sz,'Pending'].sum())
+        other=g.loc[~g['Size'].isin(['M','L','XL','XXL'])]
+        if not other.empty:
+            row['Details']=str(row['Details'] or '')+' | '+', '.join(f"{r['Size']}: {int(r['Pending'])}" for _,r in other.iterrows())
+        row['Qty']=int(g['Pending'].sum())
+        row['Amount']=round(float(g['Amount'].sum()),2)
+        rows.append(row)
+    return pd.DataFrame(rows).reindex(columns=columns).sort_values(['Order No.'],ascending=False).reset_index(drop=True)
 
 
 def page_dispatch(view='dispatch'):
-    labels={'dispatch':'Pending to Dispatch','party':'Party Wise Pending Order List','agent':'Agent Wise Pending Order List'}
-    st.title(labels.get(view,'Pending to Dispatch'))
-    if view == 'dispatch':
-        parties=q("""SELECT DISTINCT p.id,p.party_name,p.city,COALESCE(a.agent_name,'') AS agent_name
-          FROM parties p LEFT JOIN agents a ON a.id=p.agent_id JOIN orders o ON o.party_id=p.id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id
-          WHERE o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty>COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)
+    labels={'dispatch':'Pending to Dispatch Order','party':'Party Wise Pending Report',
+            'agent':'Agent Wise Pending Report','sku':'SKU Wise Pending Report'}
+    st.title(labels.get(view,'Pending to Dispatch Order'))
+    if view=='dispatch':
+        parties=q("""SELECT DISTINCT p.id,p.party_name,p.city,COALESCE(a.agent_name,'') agent_name
+          FROM parties p LEFT JOIN agents a ON a.id=p.agent_id JOIN orders o ON o.party_id=p.id
+          JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id
+          WHERE o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty >
+          COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)+
+          COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0)
           ORDER BY p.party_name""")
         if parties.empty:
-            st.success('હાલમાં કોઈ Party ના pending orders નથી.')
-        else:
-            pid=st.selectbox('Select Party Name',parties.id.astype(int).tolist(),format_func=lambda x: parties.loc[parties.id.astype(int)==int(x)].iloc[0]['party_name'],key='dispatch_party_select')
-            selected_party=parties.loc[parties.id.astype(int)==int(pid)].iloc[0]
-            st.caption(f"Agent: {selected_party['agent_name'] or '—'} · City: {selected_party['city'] or '—'}")
-            df=q("""SELECT o.id AS order_id,o.order_no AS \"Order No.\",o.order_date AS \"Order Date\",i.id AS item_id,i.sr_no AS \"Sr.\",i.particulars AS \"Description\",i.piece_rate AS \"Rate\",i.discount AS \"Discount %\",s.id AS size_id,s.size_code AS \"Size\",s.ordered_qty AS \"Order Qty\",COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0) AS \"Dispatched Qty\",o.narration AS \"Order Details\",s.cancelled AS cancelled,o.cancelled AS order_cancelled
-              FROM orders o JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id WHERE o.party_id=:pid AND o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty>COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0) ORDER BY o.order_no DESC,i.sr_no,s.size_code""",{'pid':int(pid)})
-            df['Pending Qty']=(df['Order Qty'].astype(int)-df['Dispatched Qty'].astype(int)).clip(lower=0)
-            st.subheader('Selected Party — Pending Order Items')
-            edit=pd.DataFrame({'Dispatch?':False,'Order No.':df['Order No.'].astype(str),'Order Date':df['Order Date'].astype(str),'SKU Code':df['Description'].astype(str),'Size':df['Size'].astype(str),'Order Qty':df['Order Qty'].astype(int),'Dispatched Qty':df['Dispatched Qty'].astype(int),'Pending Qty':df['Pending Qty'].astype(int),'Dispatch Qty':[0 for _ in range(len(df))],'Amount':[round(float(r['Rate'] or 0)*int(r['Pending Qty']),2) for _,r in df.iterrows()],'Discount %':df['Discount %'].fillna(0),'Details':df['Order Details'].fillna('').astype(str),'Cancel':False,'_size_id':df['size_id'].astype(int)}).reset_index(drop=True)
-            st.caption('Dispatch? tick કરીને Dispatch Qty માં મોકલવાની quantity લખો. Cancel tick કરવાથી બાકી pending size cancel થશે.')
-            edited=st.data_editor(edit,key=f'dispatch_editor_{int(pid)}',use_container_width=True,hide_index=True,num_rows='fixed',column_config={'Dispatch?':st.column_config.CheckboxColumn('Dispatch?'),'Dispatch Qty':st.column_config.NumberColumn('Dispatch Qty',min_value=0,step=1),'Cancel':st.column_config.CheckboxColumn('Cancel'),'_size_id':None,'Order No.':st.column_config.TextColumn(disabled=True),'Order Date':st.column_config.TextColumn(disabled=True),'SKU Code':st.column_config.TextColumn(disabled=True),'Size':st.column_config.TextColumn(disabled=True),'Order Qty':st.column_config.NumberColumn(disabled=True),'Dispatched Qty':st.column_config.NumberColumn(disabled=True),'Pending Qty':st.column_config.NumberColumn(disabled=True),'Amount':st.column_config.NumberColumn(disabled=True,format='₹%.2f'),'Discount %':st.column_config.NumberColumn(disabled=True)})
-            if st.button('Save Dispatch / Cancel Changes',type='primary',key='save_party_dispatch'):
-                errors=[]; saved=0; cancelled=0
-                for _,r in edited.iterrows():
-                    size_id=int(r['_size_id']); source=df.loc[df['size_id'].astype(int)==size_id].iloc[0]
-                    if bool(r['Cancel']): continue
-                    if bool(r['Dispatch?']):
-                        try: qty=int(r['Dispatch Qty'] or 0)
-                        except Exception: qty=0
-                        pending=int(source['Pending Qty'])
-                        if qty<1 or qty>pending: errors.append(f"Order #{source['Order No.']} {source['Description']} ({source['Size']}): Dispatch Qty 1 થી {pending} વચ્ચે હોવી જોઈએ.")
-                if errors: st.error('Save પહેલાં Dispatch Qty સુધારો:\n'+'\n'.join(errors))
-                else:
+            st.success('હાલ કોઈ Party નો Order dispatch માટે pending નથી.')
+            return
+        options=parties.id.astype(int).tolist()
+        pid=st.selectbox('Select Party Name',options,format_func=lambda v: str(parties.loc[parties.id.astype(int)==v,'party_name'].iloc[0]),key='dispatch_party_select')
+        party=parties.loc[parties.id.astype(int)==pid].iloc[0]
+        st.caption(f"Agent: {party['agent_name'] or '—'} · City: {party['city'] or '—'}")
+        df=q("""SELECT o.order_no AS "Order No.",o.order_date AS "Order Date",
+           i.particulars AS "SKU Code",s.size_code AS "Size",s.id AS size_id,
+           s.ordered_qty AS "Order Qty",o.narration AS Details,
+           COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0) AS dispatched,
+           COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0) AS cancelled_qty
+           FROM orders o JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id
+           WHERE o.party_id=:pid AND o.cancelled=0 AND s.cancelled=0
+           ORDER BY o.order_no DESC,i.sr_no,s.size_code""",{'pid':int(pid)})
+        df['Pending Qty']=(df['Order Qty'].astype(int)-df['dispatched'].astype(int)-df['cancelled_qty'].astype(int)).clip(lower=0)
+        df=df[df['Pending Qty']>0]
+        st.caption('દરેક pending piece માટે અલગ row છે. Dispatch tick કરતાં Cancel છુપાશે અને Cancel tick કરતાં Dispatch છુપાશે.')
+        header=st.columns([1.1,1,1.2,.55,.7,.8,.8,1.8,.7])
+        for col,label in zip(header,['Order No.','Order Date','SKU Code','Size','Dispatch','Order Qty','Pending Qty','Details','Cancel']):
+            col.markdown(f'**{label}**')
+        selected=[]
+        for _,r in df.iterrows():
+            size_id=int(r['size_id']); pending=int(r['Pending Qty'])
+            for piece in range(pending):
+                token=f'{pid}_{size_id}_{piece}'
+                dispatch_key=f'piece_dispatch_{token}'; cancel_key=f'piece_cancel_{token}'
+                dispatch_checked=bool(st.session_state.get(dispatch_key,False))
+                cancel_checked=bool(st.session_state.get(cancel_key,False))
+                with st.container(border=True):
+                    c=st.columns([1.1,1,1.2,.55,.7,.8,.8,1.8,.7],vertical_alignment='center')
+                    c[0].write(str(r['Order No.']))
+                    c[1].write(pd.to_datetime(r['Order Date']).strftime('%d-%m-%Y'))
+                    c[2].write(str(r['SKU Code']))
+                    c[3].write(str(r['Size']))
+                    if not cancel_checked:
+                        dispatch_checked=c[4].checkbox('Dispatch',key=dispatch_key,label_visibility='collapsed')
+                    else: c[4].write('—')
+                    c[5].write(int(r['Order Qty']))
+                    c[6].write(1)
+                    details=c[7].text_input('Details',value=str(r['Details'] or ''),key=f'piece_details_{token}',label_visibility='collapsed')
+                    if not dispatch_checked:
+                        cancel_checked=c[8].checkbox('Cancel',key=cancel_key,label_visibility='collapsed')
+                    else: c[8].write('—')
+                    if dispatch_checked or cancel_checked:
+                        selected.append((size_id,str(r['Size']),details,'dispatch' if dispatch_checked else 'cancel',token))
+        if st.button('Save to Dispatched',type='primary',use_container_width=True,key='save_to_dispatched'):
+            if not selected:
+                st.info('પહેલાં Dispatch અથવા Cancel checkbox પસંદ કરો.')
+            else:
+                try:
                     with engine.begin() as conn:
-                        for _,r in edited.iterrows():
-                            size_id=int(r['_size_id']); source=df.loc[df['size_id'].astype(int)==size_id].iloc[0]
-                            if bool(r['Cancel']): conn.execute(text('UPDATE order_item_sizes SET cancelled=1 WHERE id=:id'),{'id':size_id}); cancelled+=1; continue
-                            if bool(r['Dispatch?']):
-                                qty=int(r['Dispatch Qty'] or 0)
-                                conn.execute(text("INSERT INTO order_dispatches(order_size_id,dispatched_size,qty,dispatch_date,details,invoice_number) VALUES(:id,:size,:qty,:date,:details,'')"),{'id':size_id,'size':str(source['Size']),'qty':qty,'date':date.today(),'details':str(r['Details'] or '').strip()}); saved+=1
-                    if saved or cancelled: st.success(f'Dispatch entries: {saved} · Cancelled size rows: {cancelled}.'); st.rerun()
-                    else: st.info('કોઈ Dispatch અથવા Cancel પસંદ કર્યું નથી.')
+                        counts={}
+                        for size_id,sz,details,action,token in selected:
+                            counts[size_id]=counts.get(size_id,0)+1
+                        for size_id,count in counts.items():
+                            # PostgreSQL locks the size row during this transaction.
+                            lock=' FOR UPDATE' if engine.dialect.name=='postgresql' else ''
+                            record=conn.execute(text('SELECT ordered_qty,cancelled FROM order_item_sizes WHERE id=:id'+lock),{'id':size_id}).mappings().first()
+                            if not record or int(record['cancelled']): raise ValueError('આ Order size હવે pending નથી.')
+                            sent=conn.execute(text('SELECT COALESCE(SUM(qty),0) FROM order_dispatches WHERE order_size_id=:id'),{'id':size_id}).scalar()
+                            cancelled=conn.execute(text('SELECT COALESCE(SUM(qty),0) FROM order_size_cancellations WHERE order_size_id=:id'),{'id':size_id}).scalar()
+                            if count>int(record['ordered_qty'])-int(sent)-int(cancelled):
+                                raise ValueError('Pending Qty બદલાઈ ગઈ છે. Refresh કરીને ફરીથી પસંદ કરો.')
+                        for size_id,sz,details,action,token in selected:
+                            if action=='dispatch':
+                                conn.execute(text("INSERT INTO order_dispatches(order_size_id,dispatched_size,qty,dispatch_date,details,invoice_number) VALUES(:id,:size,1,:date,:details,'')"),{'id':size_id,'size':sz,'date':date.today(),'details':details})
+                            else:
+                                conn.execute(text('INSERT INTO order_size_cancellations(order_size_id,qty,details) VALUES(:id,1,:details)'),{'id':size_id,'details':details})
+                    for key in list(st.session_state):
+                        if key.startswith(('piece_dispatch_','piece_cancel_','piece_details_')): st.session_state.pop(key,None)
+                    st.session_state.pop('dispatch_party_select',None)
+                    st.success('Selected pieces Dispatched / Cancelled માં save થયા.')
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f'Save ન થયું: {exc}')
         return
 
-    shown=_pending_order_rows()
+    raw=_pending_raw()
     if view=='party':
-        parties=sorted(shown['Party Name'].dropna().unique().tolist()) if not shown.empty else []
-        chosen=st.selectbox('Select Party', ['All Parties']+parties,key='party_pending_list_filter')
-        shown=shown if chosen=='All Parties' else shown[shown['Party Name']==chosen]
-        report_title='Party Wise Pending Order List'; filename='shubhvastra_party_pending_orders.pdf'
+        parties=q('SELECT party_name FROM parties ORDER BY party_name')
+        options=['All Parties']+parties['party_name'].dropna().unique().tolist()
+        chosen=st.selectbox('Select Party',options,key='party_pending_report_filter')
+        if chosen!='All Parties': raw=raw[raw['Party Name']==chosen]
+        show_party=chosen=='All Parties'
+        filename='shubhvastra_party_pending_report.pdf'
+    elif view=='agent':
+        agents=q('SELECT agent_name FROM agents ORDER BY agent_name')
+        options=['All Agents']+agents['agent_name'].dropna().unique().tolist()
+        chosen=st.selectbox('Select Agent',options,key='agent_pending_report_filter')
+        if chosen!='All Agents': raw=raw[raw['Agent Name']==chosen]
+        show_party=True
+        filename='shubhvastra_agent_pending_report.pdf'
     else:
-        agents=sorted([x for x in shown['Agent Name'].dropna().unique().tolist() if x and x!='—']) if not shown.empty else []
-        chosen=st.selectbox('Select Agent', ['All Agents']+agents,key='agent_pending_list_filter')
-        shown=shown if chosen=='All Agents' else shown[shown['Agent Name']==chosen]
-        report_title='Agent Wise Pending Order List'; filename='shubhvastra_agent_pending_orders.pdf'
-    if shown.empty: st.info('હાલમાં pending order મળ્યો નથી.')
-    else: st.dataframe(shown,use_container_width=True,hide_index=True)
-    st.download_button('Download PDF Preview',pending_report_pdf_bytes(report_title,shown),file_name=filename,mime='application/pdf',key=f'{view}_pending_pdf')
+        skus=sorted(raw['SKU Code'].dropna().astype(str).unique().tolist()) if not raw.empty else []
+        chosen=st.multiselect('Select Pending SKU Codes',skus,default=[],placeholder='All Pending SKUs',key='sku_pending_report_filter')
+        if chosen: raw=raw[raw['SKU Code'].astype(str).isin(chosen)]
+        show_party=True
+        filename='shubhvastra_sku_pending_report.pdf'
+    shown=_pending_report_rows(raw,show_party=show_party)
+    if shown.empty:
+        st.info('No pending orders found for the selected filter.')
+    else:
+        st.dataframe(shown,use_container_width=True,hide_index=True)
+        st.caption(f'Total pending pieces: {int(shown["Qty"].sum())} · Amount: ₹{shown["Amount"].sum():,.2f}')
+        st.download_button('Download PDF',pending_report_pdf_bytes(labels[view],shown),file_name=filename,mime='application/pdf',key=f'{view}_pending_pdf',use_container_width=True)
 
 
 def page_cancelled_orders():
     st.title('Cancelled Orders')
-    cancelled=q("""SELECT p.party_name AS \"Party Name\",COALESCE(a.agent_name,'—') AS \"Agent Name\",o.order_no AS \"Order No.\",o.order_date AS \"Order Date\",i.particulars AS \"SKU Code\",s.size_code AS Size,s.ordered_qty AS \"Order Qty\",s.cancelled AS Cancelled FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id WHERE o.cancelled=1 OR s.cancelled=1 ORDER BY o.order_no DESC""")
+    cancelled=q("""SELECT p.party_name AS \"Party Name\",COALESCE(a.agent_name,'—') AS \"Agent Name\",o.order_no AS \"Order No.\",o.order_date AS \"Order Date\",i.particulars AS \"SKU Code\",s.size_code AS Size,s.ordered_qty AS \"Order Qty\",s.cancelled AS Cancelled FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id WHERE o.cancelled=1 OR s.cancelled=1 OR EXISTS(SELECT 1 FROM order_size_cancellations c WHERE c.order_size_id=s.id) ORDER BY o.order_no DESC""")
     if cancelled.empty: st.info('Cancelled orders નથી.')
     else: st.dataframe(cancelled,use_container_width=True,hide_index=True)
     st.download_button('Download Cancelled PDF',pending_report_pdf_bytes('Cancelled Orders',cancelled),file_name='shubhvastra_cancelled_orders.pdf',mime='application/pdf',key='utilities_cancelled_pdf')
@@ -1192,7 +1260,7 @@ with st.sidebar:
     if default not in menu: default="Dashboard"
     page=st.radio("Navigation",menu,index=menu.index(default),key="main_navigation")
     if page == "Pending to Dispatched":
-        dispatch_options = ["Pending to Dispatch", "Party Wise Pending Order List", "Agent Wise Pending Order List"]
+        dispatch_options = ["Pending to Dispatch Order", "Party Wise Pending Report", "Agent Wise Pending Report", "SKU Wise Pending Report"]
         dispatch_choice = st.selectbox("Pending to Dispatched", dispatch_options, key="pending_dispatch_submenu")
     else:
         dispatch_choice = ""
@@ -1213,7 +1281,7 @@ elif page=="Utilities" and util_choice == "Order History / Order List": page_ord
 elif page=="Utilities" and util_choice == "Cancelled Orders": page_cancelled_orders()
 elif page=="Utilities" and util_choice == "Admin Panel / Backup & Restore" and is_admin(): page_settings()
 elif page=="Pending to Dispatched":
-    page_dispatch({"Pending to Dispatch":"dispatch", "Party Wise Pending Order List":"party", "Agent Wise Pending Order List":"agent"}.get(dispatch_choice,"dispatch"))
+    page_dispatch({"Pending to Dispatch Order":"dispatch", "Party Wise Pending Report":"party", "Agent Wise Pending Report":"agent", "SKU Wise Pending Report":"sku"}.get(dispatch_choice,"dispatch"))
 elif page=="Order Reports": page_reports()
 
 
