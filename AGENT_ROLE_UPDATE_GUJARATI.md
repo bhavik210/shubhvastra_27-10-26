@@ -10,3 +10,6 @@ SHUBHVASTRA — Agent Role / User Access Update
 8. Database schema upgrade માં users.agent_id column ઉમેરાય છે; હાલના business records delete/replace થતા નથી.
 
 Update પહેલાં full backup ZIP અને database backup download કરો. GitHub માં code upload કરતી વખતે database file replace/delete ન કરશો. Streamlit Cloud પર deploy કર્યા પછી Admin Panel માં Agent role user બનાવીને અલગ browser/incognito session માં login test કરો.
+
+
+Login પછી Agent role માં navigation error fix: role-specific menu માં ન હોય તેવો જૂનો page selection હોય તો હવે Agent menu નું પ્રથમ page પસંદ થશે.

@@ -1410,8 +1410,14 @@ with st.sidebar:
         st.session_state.pop("authenticated_user",None)
         st.session_state.pop("main_navigation",None)
         st.rerun()
-    default=st.session_state.get("page","Dashboard")
-    if default not in menu: default="Dashboard"
+    # The navigation options depend on the logged-in role. A previous session may
+    # leave a page name such as "Dashboard" selected, which is not valid for Agent.
+    default=st.session_state.get("page", menu[0])
+    if default not in menu:
+        default=menu[0]
+    # Keep the radio widget's stored value aligned with the role-specific menu.
+    if st.session_state.get("main_navigation") not in menu:
+        st.session_state["main_navigation"] = default
     page=st.radio("Navigation",menu,index=menu.index(default),key="main_navigation")
     if page == "Pending to Dispatched":
         dispatch_options = ["Pending to Dispatch Order", "Party Wise Pending Report", "Agent Wise Pending Report", "SKU Wise Pending Report"]
