@@ -386,7 +386,7 @@ def login_screen():
 
 
 def page_agent_portal(view="dashboard"):
-    """Read-only portal scoped strictly to the logged-in agent's assigned parties."""
+    """Read-only portal strictly scoped to the logged-in agent's assigned parties."""
     user = current_user() or {}
     aid = user.get("agent_id")
     agent = one("SELECT id, agent_name FROM agents WHERE id=:id", {"id": int(aid)}) if aid is not None else None
@@ -395,50 +395,87 @@ def page_agent_portal(view="dashboard"):
         return
     aid = int(agent["id"])
     agent_name = str(agent["agent_name"])
+
     if view == "dashboard":
-        st.title(f"Agent Dashboard — {agent_name}")
-        parties = q("SELECT p.id,p.party_name AS \"Party Name\",p.phone_number AS \"Phone Number\",p.city AS City,p.state AS State,p.address AS Address FROM parties p WHERE p.agent_id=:aid ORDER BY p.party_name", {"aid": aid})
-        summary = one("""SELECT COUNT(DISTINCT p.id) AS parties,
-            COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM orders o JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id WHERE o.party_id=p.id AND o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty > COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0) + COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0)) THEN p.id END) AS pending_parties
-            FROM parties p WHERE p.agent_id=:aid""", {"aid": aid})
-        pending = one("""SELECT COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(CASE WHEN o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty-COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)-COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0)>0 THEN s.ordered_qty-COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)-COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0) ELSE 0 END),0) AS qty
-            FROM orders o JOIN parties p ON p.id=o.party_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id WHERE p.agent_id=:aid AND o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty > COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)+COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0)""", {"aid": aid})
-        dispatched = one("""SELECT COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(d.qty),0) AS qty FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id JOIN orders o ON o.id=i.order_id JOIN parties p ON p.id=o.party_id WHERE p.agent_id=:aid""", {"aid": aid})
-        cancelled = one("""SELECT COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(c.qty),0) AS qty FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN order_items i ON i.order_id=o.id LEFT JOIN order_item_sizes s ON s.order_item_id=i.id LEFT JOIN order_size_cancellations c ON c.order_size_id=s.id WHERE p.agent_id=:aid AND (o.cancelled=1 OR s.cancelled=1 OR c.id IS NOT NULL)""", {"aid": aid})
+        st.title(f"My Dashboard — {agent_name}")
+        parties = q('''SELECT p.party_name AS "Party Name",p.phone_number AS "Phone Number",
+            p.city AS City,p.state AS State,p.address AS Address,p.gst_number AS "GST Number",
+            p.transport_details AS "Transport Name",p.transport_gst_number AS "Transport ID"
+            FROM parties p WHERE p.agent_id=:aid ORDER BY p.party_name''', {"aid": aid})
+        summary = one("SELECT COUNT(*) AS parties FROM parties WHERE agent_id=:aid", {"aid": aid})
+        pending = one('''SELECT COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(CASE WHEN o.cancelled=0 AND s.cancelled=0 THEN CASE WHEN s.ordered_qty-COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)-COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0)>0 THEN s.ordered_qty-COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)-COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0) ELSE 0 END ELSE 0 END),0) AS qty
+            FROM orders o JOIN parties p ON p.id=o.party_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id
+            WHERE p.agent_id=:aid AND o.cancelled=0 AND s.cancelled=0 AND s.ordered_qty>COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)+COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0)''', {"aid": aid})
+        dispatched = one('''SELECT COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(d.qty),0) AS qty FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id JOIN orders o ON o.id=i.order_id JOIN parties p ON p.id=o.party_id WHERE p.agent_id=:aid''', {"aid": aid})
+        cancelled = one('''SELECT COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(CASE WHEN o.cancelled=1 OR s.cancelled=1 THEN s.ordered_qty ELSE COALESCE(c.qty,0) END),0) AS qty FROM orders o JOIN parties p ON p.id=o.party_id LEFT JOIN order_items i ON i.order_id=o.id LEFT JOIN order_item_sizes s ON s.order_item_id=i.id LEFT JOIN order_size_cancellations c ON c.order_size_id=s.id WHERE p.agent_id=:aid AND (o.cancelled=1 OR s.cancelled=1 OR c.id IS NOT NULL)''', {"aid": aid})
         cols=st.columns(5)
-        metrics=[("Total Parties",summary.get("parties",0)),("Pending Orders",pending.get("orders",0)),("Pending Pieces",pending.get("qty",0)),("Dispatched Orders",dispatched.get("orders",0)),("Cancelled Orders",cancelled.get("orders",0))]
+        metrics=[("Total Parties",summary.get("parties",0)),("Pending Orders",pending.get("orders",0)),("Pending Pieces",pending.get("qty",0)),("Total Dispatched Orders",dispatched.get("orders",0)),("Total Cancle Orders",cancelled.get("orders",0))]
         for col,(label,value) in zip(cols,metrics):
             with col: st.markdown(f"<div class='metric-card'><div class='metric-label'>{label}</div><div class='metric-value'>{int(value or 0)}</div></div>", unsafe_allow_html=True)
         st.subheader("My Parties")
-        st.caption("આ list ફક્ત તમારા Agent account સાથે જોડાયેલી Parties ની છે. આ પેજ read-only છે.")
+        st.caption("આ list માં ફક્ત તમારા Agent account સાથે જોડાયેલી Parties છે. આ પેજ read-only છે.")
         if parties.empty: st.info("આ Agent સાથે કોઈ Party જોડાયેલી નથી.")
-        else: st.dataframe(parties.drop(columns=["id"]), use_container_width=True, hide_index=True)
+        else: st.dataframe(parties.fillna(""), use_container_width=True, hide_index=True)
+        return
+
+    party_rows = q("SELECT id,party_name FROM parties WHERE agent_id=:aid ORDER BY party_name", {"aid": aid})
+    if party_rows.empty:
+        st.info("આ Agent સાથે કોઈ Party જોડાયેલી નથી.")
         return
     if view == "pending":
-        st.title(f"My Pending Orders — {agent_name}")
-        df=q("""SELECT p.party_name AS \"Party Name\",o.order_no AS \"Order No.\",o.order_date AS \"Order Date\",i.particulars AS \"SKU Code\",s.size_code AS Size,s.ordered_qty AS \"Order Qty\",COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0) AS Dispatched,COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0) AS Cancelled FROM orders o JOIN parties p ON p.id=o.party_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id WHERE p.agent_id=:aid AND o.cancelled=0 AND s.cancelled=0 ORDER BY o.order_no DESC,p.party_name,i.particulars,s.size_code""", {"aid":aid})
-        if not df.empty: df["Pending Qty"]=(df["Order Qty"].astype(int)-df["Dispatched"].astype(int)-df["Cancelled"].astype(int)).clip(lower=0); df=df[df["Pending Qty"]>0].drop(columns=["Dispatched","Cancelled"])
-        for c in ("Order Date",):
-            if not df.empty: df[c]=pd.to_datetime(df[c],errors="coerce").dt.strftime("%d-%m-%Y").fillna("")
-        filename="shubhvastra_agent_pending_orders.pdf"
-        title="My Pending Orders"
+        title = "My Party Pending Orders"
+        st.title(f"{title} — {agent_name}")
+        options = [(None, "All My Party Pending Orders")] + [(int(r.id), str(r.party_name)) for r in party_rows.itertuples()]
+        selected_party = st.selectbox("Select Party", options, format_func=lambda x: x[1], key="agent_portal_pending_party")[0]
+        qty_expr = "CASE WHEN s.ordered_qty-COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)-COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0)>0 THEN s.ordered_qty-COALESCE((SELECT SUM(d.qty) FROM order_dispatches d WHERE d.order_size_id=s.id),0)-COALESCE((SELECT SUM(c.qty) FROM order_size_cancellations c WHERE c.order_size_id=s.id),0) ELSE 0 END"
+        raw = q(f'''SELECT o.id AS order_id,o.order_no AS "Order No.",o.order_date AS "Order Date",p.id AS party_id,p.party_name AS "Party Name",i.particulars AS "SKU Code",s.size_code AS Size,{qty_expr} AS Qty,i.discount AS Discount,i.piece_rate AS Rate
+            FROM orders o JOIN parties p ON p.id=o.party_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id
+            WHERE p.agent_id=:aid AND o.cancelled=0 AND s.cancelled=0 AND {qty_expr}>0 ORDER BY o.order_no DESC,p.party_name,i.particulars''', {"aid": aid})
+        filename = "shubhvastra_agent_pending_orders.pdf"
     elif view == "dispatched":
-        st.title(f"My Dispatched Orders — {agent_name}")
-        df=q("""SELECT p.party_name AS \"Party Name\",o.order_no AS \"Order No.\",o.order_date AS \"Order Date\",d.dispatch_date AS \"Dispatch Date\",i.particulars AS \"SKU Code\",d.dispatched_size AS Size,d.qty AS \"Dispatched Qty\",d.invoice_number AS \"Invoice No.\",d.details AS Details FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id JOIN orders o ON o.id=i.order_id JOIN parties p ON p.id=o.party_id WHERE p.agent_id=:aid ORDER BY d.dispatch_date DESC,o.order_no DESC,p.party_name""", {"aid":aid})
-        filename="shubhvastra_agent_dispatched_orders.pdf"; title="My Dispatched Orders"
-        for c in ("Order Date","Dispatch Date"):
-            if not df.empty: df[c]=pd.to_datetime(df[c],errors="coerce").dt.strftime("%d-%m-%Y").fillna("")
+        title = "Total Dispatched Orders"
+        st.title(f"{title} — {agent_name}")
+        options = [(None, "All My Party Dispatched Orders")] + [(int(r.id), str(r.party_name)) for r in party_rows.itertuples()]
+        selected_party = st.selectbox("Select Party", options, format_func=lambda x: x[1], key="agent_portal_dispatched_party")[0]
+        raw = q('''SELECT o.id AS order_id,o.order_no AS "Order No.",o.order_date AS "Order Date",p.id AS party_id,p.party_name AS "Party Name",i.particulars AS "SKU Code",d.dispatched_size AS Size,d.qty AS Qty,i.discount AS Discount,i.piece_rate AS Rate
+            FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id JOIN orders o ON o.id=i.order_id JOIN parties p ON p.id=o.party_id
+            WHERE p.agent_id=:aid ORDER BY o.order_no DESC,p.party_name,i.particulars''', {"aid": aid})
+        filename = "shubhvastra_agent_dispatched_orders.pdf"
     else:
-        st.title(f"My Cancelled Orders — {agent_name}")
-        df=q("""SELECT DISTINCT p.party_name AS \"Party Name\",o.order_no AS \"Order No.\",o.order_date AS \"Order Date\",i.particulars AS \"SKU Code\",s.size_code AS Size,s.ordered_qty AS \"Order Qty\",CASE WHEN o.cancelled=1 THEN 'Order Cancelled' WHEN s.cancelled=1 THEN 'Size Cancelled' ELSE 'Piece Cancelled' END AS \"Cancel Status\",COALESCE(c.qty,0) AS \"Cancelled Qty\",COALESCE(c.details,'') AS Details FROM orders o JOIN parties p ON p.id=o.party_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id LEFT JOIN order_size_cancellations c ON c.order_size_id=s.id WHERE p.agent_id=:aid AND (o.cancelled=1 OR s.cancelled=1 OR c.id IS NOT NULL) ORDER BY o.order_no DESC,p.party_name""", {"aid":aid})
-        filename="shubhvastra_agent_cancelled_orders.pdf"; title="My Cancelled Orders"
-        if not df.empty: df["Order Date"]=pd.to_datetime(df["Order Date"],errors="coerce").dt.strftime("%d-%m-%Y").fillna("")
-    if df.empty:
-        st.info("આ Agent માટે આ પ્રકારના records મળ્યા નથી.")
-    else:
-        st.dataframe(df,use_container_width=True,hide_index=True)
-        st.download_button("Download PDF",pending_report_pdf_bytes(title,df),file_name=filename,mime="application/pdf",key=f"agent_portal_{view}_pdf",use_container_width=True)
+        title = "Total Cancle Orders"
+        st.title(f"{title} — {agent_name}")
+        options = [(None, "All My Party Cancelled Orders")] + [(int(r.id), str(r.party_name)) for r in party_rows.itertuples()]
+        selected_party = st.selectbox("Select Party", options, format_func=lambda x: x[1], key="agent_portal_cancelled_party")[0]
+        raw = q('''SELECT o.id AS order_id,o.order_no AS "Order No.",o.order_date AS "Order Date",p.id AS party_id,p.party_name AS "Party Name",i.particulars AS "SKU Code",s.size_code AS Size,
+            CASE WHEN o.cancelled=1 OR s.cancelled=1 THEN s.ordered_qty ELSE COALESCE(c.qty,0) END AS Qty,
+            i.discount AS Discount,i.piece_rate AS Rate
+            FROM orders o JOIN parties p ON p.id=o.party_id JOIN order_items i ON i.order_id=o.id JOIN order_item_sizes s ON s.order_item_id=i.id LEFT JOIN order_size_cancellations c ON c.order_size_id=s.id
+            WHERE p.agent_id=:aid AND (o.cancelled=1 OR s.cancelled=1 OR c.id IS NOT NULL) ORDER BY o.order_no DESC,p.party_name,i.particulars''', {"aid": aid})
+        filename = "shubhvastra_agent_cancelled_orders.pdf"
 
+    if selected_party is not None:
+        raw = raw[raw["party_id"] == int(selected_party)].copy()
+    if not raw.empty:
+        raw["Order Date"] = pd.to_datetime(raw["Order Date"], errors="coerce").dt.strftime("%d-%m-%Y").fillna("")
+        raw["Qty"] = pd.to_numeric(raw["Qty"], errors="coerce").fillna(0)
+        raw["Discount"] = pd.to_numeric(raw["Discount"], errors="coerce").fillna(0)
+        raw["Rate"] = pd.to_numeric(raw["Rate"], errors="coerce").fillna(0)
+        index_cols = ["order_id", "Order No.", "Order Date", "party_id", "Party Name", "SKU Code", "Discount", "Rate"]
+        pivot = raw.pivot_table(index=index_cols, columns="Size", values="Qty", aggfunc="sum", fill_value=0).reset_index()
+        pivot.columns.name = None
+        for size in SIZES:
+            if size not in pivot.columns: pivot[size] = 0
+        pivot["Qty"] = pivot[SIZES].sum(axis=1)
+        pivot["Amount"] = pivot["Qty"] * pivot["Rate"] - pivot["Discount"]
+        df = pivot[["Order No.", "Order Date", "Party Name", "SKU Code", "M", "L", "XL", "XXL", "Qty", "Discount", "Amount"]].copy()
+        for c in ["M", "L", "XL", "XXL", "Qty"]: df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+        for c in ["Discount", "Amount"]: df[c] = df[c].map(lambda x: f"₹{float(x or 0):,.2f}")
+        df = df.sort_values(["Order No.", "Party Name", "SKU Code"], ascending=[False, True, True]).reset_index(drop=True)
+    else:
+        df = pd.DataFrame(columns=["Order No.", "Order Date", "Party Name", "SKU Code", "M", "L", "XL", "XXL", "Qty", "Discount", "Amount"])
+    if df.empty: st.info("પસંદ કરેલી Party માટે records મળ્યા નથી.")
+    else: st.dataframe(df, use_container_width=True, hide_index=True)
+    st.download_button("Download PDF", pending_report_pdf_bytes(title, df), file_name=filename, mime="application/pdf", key=f"agent_portal_{view}_pdf", use_container_width=True)
 
 def page_dashboard():
     st.title("Dashboard")
@@ -1397,7 +1434,7 @@ if role_name == "admin":
 elif role_name == "member":
     menu=["Dashboard","Party Master","Agent Master","New Order","Pending to Dispatched","Dispatched Details","Order Reports","Utilities"]
 elif role_name == "agent":
-    menu=["My Dashboard","My Pending Orders","My Dispatched Orders","My Cancelled Orders"]
+    menu=["My Dashboard","My Party Pending Orders","Total Dispatched Orders","Total Cancle Orders"]
 else:
     menu=["Dashboard","Pending to Dispatched","Dispatched Details","Order Reports","Utilities"]
 with st.sidebar:
@@ -1440,9 +1477,9 @@ with st.sidebar:
     st.session_state["page"]=page
 if role_name == "agent":
     if page == "My Dashboard": page_agent_portal("dashboard")
-    elif page == "My Pending Orders": page_agent_portal("pending")
-    elif page == "My Dispatched Orders": page_agent_portal("dispatched")
-    elif page == "My Cancelled Orders": page_agent_portal("cancelled")
+    elif page == "My Party Pending Orders": page_agent_portal("pending")
+    elif page == "Total Dispatched Orders": page_agent_portal("dispatched")
+    elif page == "Total Cancle Orders": page_agent_portal("cancelled")
 elif page=="Dashboard": page_dashboard()
 elif page=="Party Master": page_parties()
 elif page=="Agent Master": page_agents()
