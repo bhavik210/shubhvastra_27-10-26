@@ -423,7 +423,7 @@ def page_agent_portal(view="dashboard"):
         st.info("આ Agent સાથે કોઈ Party જોડાયેલી નથી.")
         return
     if view == "pending":
-        title = "Total Pending Orders"
+        title = "My Party Pending Orders"
         st.title(f"{title} — {agent_name}")
         options = [(None, "All My Party Pending Orders")] + [(int(r.id), str(r.party_name)) for r in party_rows.itertuples()]
         selected_party = st.selectbox("Select Party", options, format_func=lambda x: x[1], key="agent_portal_pending_party")[0]
@@ -437,9 +437,9 @@ def page_agent_portal(view="dashboard"):
         st.title(f"{title} — {agent_name}")
         options = [(None, "All My Party Dispatched Orders")] + [(int(r.id), str(r.party_name)) for r in party_rows.itertuples()]
         selected_party = st.selectbox("Select Party", options, format_func=lambda x: x[1], key="agent_portal_dispatched_party")[0]
-        raw = q('''SELECT o.id AS order_id,o.order_no AS "Order No.",o.order_date AS "Order Date",p.id AS party_id,p.party_name AS "Party Name",COALESCE(a.agent_name,'') AS "Agent Name",i.particulars AS "SKU Code",d.dispatched_size AS Size,d.qty AS Qty,i.discount AS Discount,i.piece_rate AS Rate,d.invoice_number AS "Invoice Number",d.dispatch_date AS "Dispatched Date",d.details AS "Dispatched Details"
-            FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id JOIN orders o ON o.id=i.order_id JOIN parties p ON p.id=o.party_id LEFT JOIN agents a ON a.id=p.agent_id
-            WHERE p.agent_id=:aid ORDER BY d.dispatch_date DESC,o.order_no DESC,p.party_name,i.particulars''', {"aid": aid})
+        raw = q('''SELECT o.id AS order_id,o.order_no AS "Order No.",o.order_date AS "Order Date",p.id AS party_id,p.party_name AS "Party Name",i.particulars AS "SKU Code",d.dispatched_size AS Size,d.qty AS Qty,i.discount AS Discount,i.piece_rate AS Rate
+            FROM order_dispatches d JOIN order_item_sizes s ON s.id=d.order_size_id JOIN order_items i ON i.id=s.order_item_id JOIN orders o ON o.id=i.order_id JOIN parties p ON p.id=o.party_id
+            WHERE p.agent_id=:aid ORDER BY o.order_no DESC,p.party_name,i.particulars''', {"aid": aid})
         filename = "shubhvastra_agent_dispatched_orders.pdf"
     else:
         title = "Total Cancle Orders"
@@ -455,43 +455,24 @@ def page_agent_portal(view="dashboard"):
 
     if selected_party is not None:
         raw = raw[raw["party_id"] == int(selected_party)].copy()
-    dispatch_view = view == "dispatched"
-    base_columns = ["Order No.", "Order Date", "Party Name", "SKU Code", "M", "L", "XL", "XXL", "Qty", "Discount", "Amount"]
-    dispatch_columns = ["Agent Name", "Order No.", "Order Date", "Party Name", "SKU Code", "M", "L", "XL", "XXL", "Qty", "Discount", "Amount", "Invoice Number", "Dispatched Date", "Dispatched Details"]
     if not raw.empty:
-        for date_col in ["Order Date"] + (["Dispatched Date"] if dispatch_view else []):
-            raw[date_col] = pd.to_datetime(raw[date_col], errors="coerce").dt.strftime("%d-%m-%Y").fillna("")
+        raw["Order Date"] = pd.to_datetime(raw["Order Date"], errors="coerce").dt.strftime("%d-%m-%Y").fillna("")
         raw["Qty"] = pd.to_numeric(raw["Qty"], errors="coerce").fillna(0)
         raw["Discount"] = pd.to_numeric(raw["Discount"], errors="coerce").fillna(0)
         raw["Rate"] = pd.to_numeric(raw["Rate"], errors="coerce").fillna(0)
-        # Normalize historic size labels (e.g. 'M (38)', 'm', ' XL ') to the four report columns.
-        def _size_key(value):
-            v = str(value or "").strip().upper()
-            for candidate in SIZES:
-                if v == candidate or v.startswith(candidate + " ") or v.startswith(candidate + "(") or v.startswith(candidate + "-"):
-                    return candidate
-            return v
-        raw["Size"] = raw["Size"].map(_size_key)
-        if dispatch_view:
-            idx = ["order_id", "Order No.", "Order Date", "party_id", "Party Name", "Agent Name", "SKU Code", "Discount", "Rate", "Invoice Number", "Dispatched Date", "Dispatched Details"]
-        else:
-            idx = ["order_id", "Order No.", "Order Date", "party_id", "Party Name", "SKU Code", "Discount", "Rate"]
-        pivot = raw.pivot_table(index=idx, columns="Size", values="Qty", aggfunc="sum", fill_value=0, dropna=False).reset_index()
+        index_cols = ["order_id", "Order No.", "Order Date", "party_id", "Party Name", "SKU Code", "Discount", "Rate"]
+        pivot = raw.pivot_table(index=index_cols, columns="Size", values="Qty", aggfunc="sum", fill_value=0).reset_index()
         pivot.columns.name = None
         for size in SIZES:
             if size not in pivot.columns: pivot[size] = 0
         pivot["Qty"] = pivot[SIZES].sum(axis=1)
         pivot["Amount"] = pivot["Qty"] * pivot["Rate"] - pivot["Discount"]
-        if dispatch_view:
-            df = pivot[["Agent Name", "Order No.", "Order Date", "Party Name", "SKU Code", "M", "L", "XL", "XXL", "Qty", "Discount", "Amount", "Invoice Number", "Dispatched Date", "Dispatched Details"]].copy()
-        else:
-            df = pivot[base_columns].copy()
+        df = pivot[["Order No.", "Order Date", "Party Name", "SKU Code", "M", "L", "XL", "XXL", "Qty", "Discount", "Amount"]].copy()
         for c in ["M", "L", "XL", "XXL", "Qty"]: df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
         for c in ["Discount", "Amount"]: df[c] = df[c].map(lambda x: f"₹{float(x or 0):,.2f}")
-        sort_cols = [c for c in (["Order No.", "Party Name", "SKU Code"] if not dispatch_view else ["Dispatched Date", "Order No.", "Party Name", "SKU Code"]) if c in df.columns]
-        df = df.sort_values(sort_cols, ascending=[False] + [True] * (len(sort_cols)-1)).reset_index(drop=True)
+        df = df.sort_values(["Order No.", "Party Name", "SKU Code"], ascending=[False, True, True]).reset_index(drop=True)
     else:
-        df = pd.DataFrame(columns=dispatch_columns if dispatch_view else base_columns)
+        df = pd.DataFrame(columns=["Order No.", "Order Date", "Party Name", "SKU Code", "M", "L", "XL", "XXL", "Qty", "Discount", "Amount"])
     if df.empty: st.info("પસંદ કરેલી Party માટે records મળ્યા નથી.")
     else: st.dataframe(df, use_container_width=True, hide_index=True)
     st.download_button("Download PDF", pending_report_pdf_bytes(title, df), file_name=filename, mime="application/pdf", key=f"agent_portal_{view}_pdf", use_container_width=True)

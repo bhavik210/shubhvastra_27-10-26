@@ -14,5 +14,3 @@ Deploy કરતા પહેલાં database backup રાખવો. Python s
 - Agent login sees only its own assigned parties and read-only pending, dispatched, cancelled reports with PDF downloads.
 - Agent role does not get access to order editing, dispatch updates, master data, Utilities, or other agents' reports.
 - See AGENT_ROLE_UPDATE_GUJARATI.md. Back up the database before deploying.
-
-Agent Portal report update (latest): Total Pending Orders menu label; normalized historic size values in M/L/XL/XXL pending columns; dispatched report includes agent, order, party, SKU size columns, qty, discount, amount, invoice number, dispatch date/details and PDF export.
