@@ -1,0 +1,5 @@
+SHUBHVASTRA PDF Preview Table Header Color Update
+
+Software na badha PDF table header ma dark background badli ne off-white (#F7F4EA) karyo chhe ane header text black karyo chhe. Aa Order Form PDF ane Pending/Agent/Party/SKU Pending Report PDF tables par lagu pade chhe.
+
+Update upload karta pehla database no backup lo. Existing database file ne replace/delete na karsho. GitHub par updated code upload karya pachi Streamlit Cloud reboot/redeploy karo.

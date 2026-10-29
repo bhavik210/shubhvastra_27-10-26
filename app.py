@@ -331,7 +331,7 @@ def order_pdf_bytes(order, items_df):
         data.append([str(sr),str(sku),str(sizes["M"]),str(sizes["L"]),str(sizes["XL"]),str(sizes["XXL"]),str(disc),f"{float(rate or 0):,.2f}",str(qty),f"{amount:,.2f}"])
     data.append(["","TOTAL","","","","","","",str(total_qty),f"{total_amount:,.2f}"])
     tab=Table(data,repeatRows=1,colWidths=[9*mm,43*mm,11*mm,11*mm,12*mm,13*mm,17*mm,19*mm,13*mm,23*mm])
-    tab.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#132b4a")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),7.5),("GRID",(0,0),(-1,-1),0.45,colors.HexColor("#9aa8b8")),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(2,1),(-1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#eaf3fb")),("FONTNAME",(0,-1),(-1,-1),"Helvetica-Bold"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+    tab.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#F7F4EA")),("TEXTCOLOR",(0,0),(-1,0),colors.black),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),7.5),("GRID",(0,0),(-1,-1),0.45,colors.HexColor("#9aa8b8")),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(2,1),(-1,-1),"RIGHT"),("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#eaf3fb")),("FONTNAME",(0,-1),(-1,-1),"Helvetica-Bold"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
     story.extend([tab, Spacer(1,4*mm)])
     if order.get("narration"): story.append(Paragraph(f"<b>Additional Order Details:</b> {str(order['narration'])}",small))
     doc.build(story)
@@ -817,9 +817,9 @@ def pending_report_pdf_bytes(title, df):
         widths=[available*w/total for w in weights]
         wrapped=[]
         for ri,row in enumerate(data):
-            wrapped.append([Paragraph(str(v).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;'), ParagraphStyle(f'pdfcell{ri}', parent=styles['BodyText'], fontName='Helvetica-Bold' if ri==0 else 'Helvetica', fontSize=7, leading=8, wordWrap='CJK')) for v in row])
+            wrapped.append([Paragraph(str(v).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;'), ParagraphStyle(f'pdfcell{ri}', parent=styles['BodyText'], fontName='Helvetica-Bold' if ri==0 else 'Helvetica', fontSize=7, leading=8, textColor=colors.black, wordWrap='CJK')) for v in row])
         tbl = Table(wrapped, repeatRows=1, colWidths=widths)
-        tbl.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),7),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#B7C3D0")),("VALIGN",(0,0),(-1,-1),"TOP"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F2F5F9")])]))
+        tbl.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#F7F4EA")),("TEXTCOLOR",(0,0),(-1,0),colors.black),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),7),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#B7C3D0")),("VALIGN",(0,0),(-1,-1),"TOP"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F2F5F9")])]))
         story.append(tbl)
     doc.build(story)
     return buff.getvalue()
