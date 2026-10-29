@@ -1,8 +1,9 @@
-SHUBHVASTRA — Pending to Dispatched 4 submenu update
+SHUBHVASTRA — Pending to Dispatch / Agent Wise Pending Report Update
 
-1. Pending to Dispatch Order: only parties with remaining pending quantity. One selectable row per pending piece. Tick Dispatch OR Cancel (the opposite checkbox is hidden). No Dispatch Qty input. Save to Dispatched writes one dispatch or cancellation record per selected piece, resets the party selection.
-2. Party Wise Pending Report: All Parties and individual party filters. M/L/XL/XXL columns, Qty, Discount, Amount (after percentage discount), Details, DD-MM-YYYY dates, PDF.
-3. Agent Wise Pending Report: Agent Master list, including agents with no pending orders; party-wise records and PDF.
-4. SKU Wise Pending Report: multiselect only SKUs with pending orders; empty selection shows all pending SKUs. Party Name included and PDF.
+1. Pending to Dispatch Order માં હવે Party auto-select નહીં થાય. પહેલા “Select Party” ખાલી selection દેખાશે; Party પસંદ કર્યા પછી જ તેની pending rows દેખાશે.
+2. Pending pieces અંગેનું explanatory caption દૂર કર્યું છે.
+3. Agent Wise Pending Report માં પહેલાં Agent પસંદ કરશો. પછી તે Agent ની pending Party list નીચે આવશે.
+4. “All [Agent] Parties” પસંદ કરતાં પસંદ કરેલા Agent ની બધી pending parties નો report દેખાશે. કોઈ ચોક્કસ Party પસંદ કરતાં ફક્ત તેની pending orders દેખાશે.
+5. અન્ય dispatch/report features અગાઉની ZIP મુજબ જ રાખ્યાં છે.
 
-A new order_size_cancellations table is created automatically by init_db to record individual cancelled pieces without destroying original ordered quantities. Back up the PostgreSQL database before deploying. Existing data is not bundled. Python syntax checked; production end-to-end testing is not performed.
+Deploy કરતા પહેલાં database backup રાખવો. Python syntax check પાસ થયું છે; live Streamlit Cloud end-to-end test કરવાનું બાકી છે.

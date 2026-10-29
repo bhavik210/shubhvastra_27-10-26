@@ -882,7 +882,10 @@ def page_dispatch(view='dispatch'):
             st.success('હાલ કોઈ Party નો Order dispatch માટે pending નથી.')
             return
         options=parties.id.astype(int).tolist()
-        pid=st.selectbox('Select Party Name',options,format_func=lambda v: str(parties.loc[parties.id.astype(int)==v,'party_name'].iloc[0]),key='dispatch_party_select')
+        pid=st.selectbox('Select Party',options,index=None,placeholder='Select Party',format_func=lambda v: str(parties.loc[parties.id.astype(int)==v,'party_name'].iloc[0]),key='dispatch_party_select')
+        if pid is None:
+            st.info('Please select a Party to view its pending orders.')
+            return
         party=parties.loc[parties.id.astype(int)==pid].iloc[0]
         st.caption(f"Agent: {party['agent_name'] or '—'} · City: {party['city'] or '—'}")
         df=q("""SELECT o.order_no AS "Order No.",o.order_date AS "Order Date",
@@ -895,7 +898,6 @@ def page_dispatch(view='dispatch'):
            ORDER BY o.order_no DESC,i.sr_no,s.size_code""",{'pid':int(pid)})
         df['Pending Qty']=(df['Order Qty'].astype(int)-df['dispatched'].astype(int)-df['cancelled_qty'].astype(int)).clip(lower=0)
         df=df[df['Pending Qty']>0]
-        st.caption('દરેક pending piece માટે અલગ row છે. Dispatch tick કરતાં Cancel છુપાશે અને Cancel tick કરતાં Dispatch છુપાશે.')
         header=st.columns([1.1,1,1.2,.55,.7,.8,.8,1.8,.7])
         for col,label in zip(header,['Order No.','Order Date','SKU Code','Size','Dispatch','Order Qty','Pending Qty','Details','Cancel']):
             col.markdown(f'**{label}**')
@@ -966,9 +968,17 @@ def page_dispatch(view='dispatch'):
         filename='shubhvastra_party_pending_report.pdf'
     elif view=='agent':
         agents=q('SELECT agent_name FROM agents ORDER BY agent_name')
-        options=['All Agents']+agents['agent_name'].dropna().unique().tolist()
-        chosen=st.selectbox('Select Agent',options,key='agent_pending_report_filter')
-        if chosen!='All Agents': raw=raw[raw['Agent Name']==chosen]
+        agent_options=agents['agent_name'].dropna().unique().tolist() if not agents.empty else []
+        if not agent_options:
+            st.info('Agent Master માં કોઈ Agent ઉપલબ્ધ નથી.')
+            return
+        chosen_agent=st.selectbox('Select Agent',agent_options,key='agent_pending_report_filter')
+        raw=raw[raw['Agent Name']==chosen_agent].copy()
+        pending_parties=sorted(raw['Party Name'].dropna().astype(str).unique().tolist()) if not raw.empty else []
+        party_options=[f'All {chosen_agent} Parties']+pending_parties
+        chosen_party=st.selectbox('Select Party',party_options,key='agent_pending_party_filter')
+        if chosen_party!=f'All {chosen_agent} Parties':
+            raw=raw[raw['Party Name']==chosen_party]
         show_party=True
         filename='shubhvastra_agent_pending_report.pdf'
     else:
